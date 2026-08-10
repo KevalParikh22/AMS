@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { useDb } from '../context/DbContext';
-import { 
-  CheckCircle2, 
-  AlertTriangle, 
-  Copy, 
+import { useLang, LanguageSwitcher } from '../i18n/LanguageContext';
+import QrCode from '../components/QrCode';
+import {
+  CheckCircle2,
+  AlertTriangle,
+  Copy,
   Calendar,
   Clock,
   MapPin,
@@ -12,6 +14,7 @@ import {
 
 export default function SharedRegistration({ eventId }) {
   const { events, sabhas, registerNewParticipant, getEffectiveStatus } = useDb();
+  const { t } = useLang();
 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -40,11 +43,11 @@ export default function SharedRegistration({ eventId }) {
     setErrorMsg('');
 
     if (!event) {
-      setErrorMsg('Invalid registration session: Event code mismatch.');
+      setErrorMsg(t('shared.invalidLinkDesc'));
       return;
     }
     if (isClosed) {
-      setErrorMsg('This registration link has expired as the event assembly is closed.');
+      setErrorMsg(t('shared.expiredError'));
       return;
     }
 
@@ -94,9 +97,9 @@ export default function SharedRegistration({ eventId }) {
       }}>
         <div className="card glass-panel" style={{ maxWidth: '480px', textAlign: 'center', padding: '3rem 2rem' }}>
           <AlertTriangle size={48} color="var(--danger)" style={{ marginBottom: '1rem' }} />
-          <h3 style={{ fontSize: '1.5rem', fontWeight: 700, fontFamily: 'var(--font-display)' }}>Invalid Session Link</h3>
+          <h3 style={{ fontSize: '1.5rem', fontWeight: 700, fontFamily: 'var(--font-display)' }}>{t('shared.invalidLinkTitle')}</h3>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginTop: '0.5rem' }}>
-            The event code provided in the registration path could not be found or has been deleted.
+            {t('shared.invalidLinkDesc')}
           </p>
         </div>
       </div>
@@ -123,9 +126,12 @@ export default function SharedRegistration({ eventId }) {
         
         {/* Brand Header */}
         <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-          <span className="badge badge-info" style={{ marginBottom: '0.75rem', padding: '0.4rem 0.8rem' }}>Public Entry Form</span>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <span className="badge badge-info" style={{ padding: '0.4rem 0.8rem' }}>{t('shared.publicEntryForm')}</span>
+            <LanguageSwitcher />
+          </div>
           <h2 style={{ fontSize: '1.75rem', fontWeight: 700, fontFamily: 'var(--font-display)' }}>{event.name}</h2>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginTop: '0.25rem' }}>Attendee Pre-Registration Portal</p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginTop: '0.25rem' }}>{t('shared.portalSubtitle')}</p>
         </div>
 
         {errorMsg && (
@@ -159,10 +165,16 @@ export default function SharedRegistration({ eventId }) {
             </div>
             
             <div>
-              <h3 style={{ fontSize: '1.4rem', fontWeight: 700 }}>Registration Submitted</h3>
+              <h3 style={{ fontSize: '1.4rem', fontWeight: 700 }}>{t('shared.submitted')}</h3>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginTop: '0.25rem' }}>
-                Your request has been sent for queue verification. Show the reference code below to the entry desk.
+                {t('shared.submittedDesc')}
               </p>
+            </div>
+
+            {/* QR for quick desk check-in (scans to the participant record ID) */}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
+              <QrCode value={receipt.id} size={140} />
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{t('shared.qrHint')}</p>
             </div>
 
             {/* Receipt Details Box */}
@@ -177,19 +189,19 @@ export default function SharedRegistration({ eventId }) {
               gap: '0.75rem'
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem' }}>
-                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Reference Code:</span>
+                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{t('shared.referenceCode')}</span>
                 <strong style={{ color: 'var(--accent)', fontSize: '0.95rem' }}>{receipt.refNumber}</strong>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Name:</span>
+                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{t('shared.name')}</span>
                 <span style={{ fontWeight: 600 }}>{receipt.name}</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Contact Phone:</span>
+                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{t('shared.contactPhone')}</span>
                 <span>{receipt.phone}</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Sabha Scope:</span>
+                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{t('shared.sabhaScope')}</span>
                 <span>{receipt.sabha}</span>
               </div>
             </div>
@@ -200,7 +212,7 @@ export default function SharedRegistration({ eventId }) {
               style={{ width: '100%', padding: '0.85rem' }}
             >
               {copiedReceipt ? <Check size={16} /> : <Copy size={16} />}
-              <span>{copiedReceipt ? 'Receipt Copied!' : 'Copy Confirmation Receipt'}</span>
+              <span>{copiedReceipt ? t('shared.receiptCopied') : t('shared.copyReceipt')}</span>
             </button>
           </div>
         ) : (
@@ -221,11 +233,11 @@ export default function SharedRegistration({ eventId }) {
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <Calendar size={14} color="var(--accent)" />
-                <span>Date: <strong>{event.date}</strong></span>
+                <span>{t('shared.date')} <strong>{event.date}</strong></span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <Clock size={14} color="var(--accent)" />
-                <span>Assembly Time: {event.startTime} - {event.endTime}</span>
+                <span>{t('shared.assemblyTime')} {event.startTime} - {event.endTime}</span>
               </div>
             </div>
 
@@ -238,19 +250,19 @@ export default function SharedRegistration({ eventId }) {
                 borderRadius: 'var(--radius-md)'
               }}>
                 <AlertTriangle size={32} style={{ marginBottom: '0.5rem' }} />
-                <h4 style={{ fontWeight: 600 }}>Registration Closed</h4>
+                <h4 style={{ fontWeight: 600 }}>{t('shared.registrationClosed')}</h4>
                 <p style={{ fontSize: '0.8rem', marginTop: '0.25rem' }}>
-                  This assembly session has concluded. Forms can no longer be accepted.
+                  {t('shared.registrationClosedDesc')}
                 </p>
               </div>
             ) : (
               <>
                 <div className="form-group">
-                  <label className="form-label">Full Name (Attendee) *</label>
+                  <label className="form-label">{t('shared.fullName')}</label>
                   <input
                     type="text"
                     className="form-control"
-                    placeholder="Enter candidate's full name"
+                    placeholder={t('shared.fullNamePlaceholder')}
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     required
@@ -258,7 +270,7 @@ export default function SharedRegistration({ eventId }) {
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label">Guardian Mobile Number *</label>
+                  <label className="form-label">{t('shared.guardianMobile')}</label>
                   <input
                     type="tel"
                     className="form-control"
@@ -270,7 +282,7 @@ export default function SharedRegistration({ eventId }) {
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label">Target Sabha Group</label>
+                  <label className="form-label">{t('shared.targetSabha')}</label>
                   {event.sabhaMandalScope !== 'All Sabhas' ? (
                     <input 
                       type="text" 
@@ -292,11 +304,11 @@ export default function SharedRegistration({ eventId }) {
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label">Guardian/Parent Name & Contact Details</label>
+                  <label className="form-label">{t('shared.guardianDetails')}</label>
                   <textarea
                     className="form-control"
                     rows={2}
-                    placeholder="e.g. Ramesh Patel (Father) - 9822334455"
+                    placeholder={t('shared.guardianPlaceholder')}
                     value={guardianDetails}
                     onChange={(e) => setGuardianDetails(e.target.value)}
                     style={{ resize: 'none' }}
@@ -308,7 +320,7 @@ export default function SharedRegistration({ eventId }) {
                   className="btn btn-primary"
                   style={{ width: '100%', padding: '0.85rem', marginTop: '0.5rem' }}
                 >
-                  Submit Registration
+                  {t('shared.submit')}
                 </button>
               </>
             )}

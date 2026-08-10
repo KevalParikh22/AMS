@@ -1,16 +1,18 @@
 import React, { useState } from 'react';
 import { useDb } from '../context/DbContext';
 import { useAuth } from '../context/AuthContext';
+import QrCode from '../components/QrCode';
 import * as XLSX from 'xlsx';
-import { 
-  Download, 
-  Search, 
-  Filter, 
-  Check, 
-  X, 
-  UserCheck, 
+import {
+  Download,
+  Search,
+  Filter,
+  Check,
+  X,
+  UserCheck,
   Link as LinkIcon,
-  AlertCircle
+  AlertCircle,
+  Printer
 } from 'lucide-react';
 
 export default function Reports() {
@@ -122,6 +124,8 @@ export default function Reports() {
     p => p.status === 'rejected' || p.status === 'linked' || p.status === 'archived'
   );
   const [archiveSearch, setArchiveSearch] = useState('');
+  const [showBadgeSheet, setShowBadgeSheet] = useState(false);
+  const [rosterVisible, setRosterVisible] = useState(50);
 
   // Sabha-wise attendance summary across events (Phase 0 decision D8).
   // Draft events are excluded; expected = members x relevant events.
@@ -442,6 +446,16 @@ export default function Reports() {
                   <Download size={14} />
                   <span>Export Full Report</span>
                 </button>
+                <button
+                  onClick={() => setShowBadgeSheet(true)}
+                  className="btn btn-secondary"
+                  style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+                  disabled={reportRoster.length === 0}
+                  title="Printable QR badge sheet for the filtered roster"
+                >
+                  <Printer size={14} />
+                  <span>QR Badges</span>
+                </button>
               </div>
             </div>
 
@@ -458,7 +472,7 @@ export default function Reports() {
                   </tr>
                 </thead>
                 <tbody>
-                  {reportRoster.map((row) => (
+                  {reportRoster.slice(0, rosterVisible).map((row) => (
                     <tr key={row.id}>
                       <td style={{ color: 'var(--text-muted)' }}>{row.id}</td>
                       <td style={{ fontWeight: 600 }}>{row.name}</td>
@@ -472,6 +486,15 @@ export default function Reports() {
                       </td>
                     </tr>
                   ))}
+                  {reportRoster.length > rosterVisible && (
+                    <tr>
+                      <td colSpan={6} style={{ textAlign: 'center', padding: '0.75rem' }}>
+                        <button onClick={() => setRosterVisible(v => v + 50)} className="btn btn-secondary" style={{ padding: '0.5rem 1.5rem', fontSize: '0.85rem' }}>
+                          Show more ({reportRoster.length - rosterVisible} remaining)
+                        </button>
+                      </td>
+                    </tr>
+                  )}
                   {reportRoster.length === 0 && (
                     <tr>
                       <td colSpan={6} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
@@ -544,6 +567,62 @@ export default function Reports() {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* Printable QR Badge Sheet overlay */}
+      {showBadgeSheet && (
+        <div className="badge-sheet-overlay" style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'var(--bg-primary)', zIndex: 1100,
+          overflowY: 'auto', padding: '1.5rem'
+        }}>
+          <div className="badge-sheet-toolbar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+            <h3 style={{ fontSize: '1.2rem', fontWeight: 700 }}>
+              QR Badge Sheet — {reportRoster.length} participant(s)
+            </h3>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button onClick={() => window.print()} className="btn btn-primary" style={{ padding: '0.5rem 1.25rem' }}>
+                <Printer size={14} />
+                <span>Print</span>
+              </button>
+              <button onClick={() => setShowBadgeSheet(false)} className="btn btn-secondary" style={{ padding: '0.5rem 1.25rem' }}>
+                <X size={14} />
+                <span>Close</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="badge-sheet-grid" style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+            gap: '0.75rem'
+          }}>
+            {reportRoster.map(p => (
+              <div key={p.id} className="qr-badge" style={{
+                backgroundColor: '#ffffff', color: '#111111',
+                border: '1px solid #cccccc', borderRadius: '8px',
+                padding: '0.9rem', textAlign: 'center',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.4rem',
+                breakInside: 'avoid'
+              }}>
+                <QrCode value={p.id} size={110} />
+                <strong style={{ fontSize: '0.9rem' }}>{p.name}</strong>
+                <span style={{ fontSize: '0.75rem', color: '#555555' }}>{p.sabha}</span>
+                <span style={{ fontSize: '0.75rem', fontWeight: 700 }}>{p.id}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Print styles: badges only, white page */}
+          <style>{`
+            @media print {
+              body * { visibility: hidden; }
+              .badge-sheet-overlay, .badge-sheet-overlay * { visibility: visible; }
+              .badge-sheet-overlay { position: absolute !important; background: #fff !important; padding: 0 !important; }
+              .badge-sheet-toolbar { display: none !important; }
+            }
+          `}</style>
         </div>
       )}
 

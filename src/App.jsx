@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { DbProvider } from './context/DbContext';
+import { LanguageProvider } from './i18n/LanguageContext';
 import Layout from './components/Layout';
 
 // Import Views
@@ -79,10 +80,12 @@ function AppContent() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <DbProvider>
-        <AppContent />
-      </DbProvider>
-    </AuthProvider>
+    <LanguageProvider>
+      <AuthProvider>
+        <DbProvider>
+          <AppContent />
+        </DbProvider>
+      </AuthProvider>
+    </LanguageProvider>
   );
 }

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { useLang, LanguageSwitcher } from '../i18n/LanguageContext';
 import { 
   LayoutDashboard, 
   ClipboardCheck, 
@@ -16,16 +17,17 @@ import {
 
 export default function Layout({ children, currentView, setView }) {
   const { user, logout, hasPermission } = useAuth();
+  const { t } = useLang();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const menuItems = [
-    { id: 'dashboard', name: 'Dashboard', icon: LayoutDashboard, requiredRole: null },
-    { id: 'attendance', name: 'Attendance Desk', icon: ClipboardCheck, requiredRole: null },
-    { id: 'registration', name: 'Registration Form', icon: UserPlus, requiredRole: 'Registration Volunteer' },
-    { id: 'import', name: 'Excel Import', icon: FileSpreadsheet, requiredRole: 'Admin' },
-    { id: 'events', name: 'Event Management', icon: Calendar, requiredRole: 'Coordinator' },
-    { id: 'reports', name: 'Reports & Exports', icon: BarChart3, requiredRole: 'Coordinator' },
-    { id: 'admin', name: 'Admin Control', icon: Settings, requiredRole: 'Admin' }
+    { id: 'dashboard', name: t('nav.dashboard'), icon: LayoutDashboard, requiredRole: null },
+    { id: 'attendance', name: t('nav.attendance'), icon: ClipboardCheck, requiredRole: null },
+    { id: 'registration', name: t('nav.registration'), icon: UserPlus, requiredRole: 'Registration Volunteer' },
+    { id: 'import', name: t('nav.import'), icon: FileSpreadsheet, requiredRole: 'Admin' },
+    { id: 'events', name: t('nav.events'), icon: Calendar, requiredRole: 'Coordinator' },
+    { id: 'reports', name: t('nav.reports'), icon: BarChart3, requiredRole: 'Coordinator' },
+    { id: 'admin', name: t('nav.admin'), icon: Settings, requiredRole: 'Admin' }
   ];
 
   const allowedItems = menuItems.filter(item => 
@@ -194,7 +196,7 @@ export default function Layout({ children, currentView, setView }) {
             style={{ width: '100%', padding: '0.6rem' }}
           >
             <LogOut size={16} />
-            <span>Sign Out</span>
+            <span>{t('nav.signOut')}</span>
           </button>
         </div>
       </aside>
@@ -212,6 +214,7 @@ export default function Layout({ children, currentView, setView }) {
         }}>
           <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }}>{getPageTitle()}</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            <LanguageSwitcher />
             <span className="badge badge-info">{user?.role} Mode</span>
             <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
               {new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}

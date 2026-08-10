@@ -75,11 +75,18 @@ Completed 2026-08-10 — decisions recorded in [phase-0-decisions.md](phase-0-de
 
 ## Phase 3 — Event-day optimization
 
-- [ ] Offline capability / poor-connectivity resilience (if confirmed as a core need)
-- [ ] QR-code or ID scanning for attendance
-- [ ] Multilingual forms and labels
-- [ ] Performance improvements for large rosters (search indexing, pagination)
-- [ ] Operational dashboards (live event-day stats, success metrics from PRD §10)
+### Completed 2026-08-10 (client-side)
+
+- [x] Offline capability — installable PWA: `public/manifest.webmanifest` + `public/sw.js` (network-first navigations with cached-shell fallback, stale-while-revalidate assets); registered in production builds only so dev HMR is unaffected. Confirmed as a need by the user.
+- [x] QR check-in — participant QR on internal and shared-form receipts, printable QR badge sheet from Reports (respects roster filters, print CSS shows badges only), and a desk scanner using the browser BarcodeDetector API with manual ID entry fallback for unsupported browsers (e.g. iOS Safari)
+- [x] Multilingual — English + Gujarati via `src/i18n/` (LanguageContext + translations dictionary, EN/ગુ switcher in the header, login, and public form); covers nav, login, attendance desk, and the full public registration form. **Gujarati strings are machine-drafted — have a native speaker review before real use.** Missing keys fall back to English; new languages are added in `translations.js`.
+- [x] Performance — memoized participant search (`useCallback`), capped desk results (30 + show-more), paginated report roster (50 + show-more)
+- [x] Operational dashboard — "Live Event Pulse" panel for the active event: checked-in total, check-ins in the last 15 minutes, last check-in (name + time), pending registrations count
+
+### Deferred to backend phase
+
+- [ ] Offline *data sync* between devices (current offline mode is per-device localStorage; multi-device sync needs the backend)
+- [ ] Full translation coverage of internal admin screens (only guardian/volunteer-facing surfaces are translated)
 
 ## Cross-cutting / engineering
 
