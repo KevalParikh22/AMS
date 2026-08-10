@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { useAuth, ROLES } from '../context/AuthContext';
+import { useLang, LanguageSwitcher } from '../i18n/LanguageContext';
 import { Lock, User } from 'lucide-react';
 
 export default function Login() {
   const { login, MOCK_USERS } = useAuth();
+  const { t } = useLang();
   const [username, setUsername] = useState('');
   const [role, setRole] = useState(ROLES.ATTENDANCE_VOLUNTEER);
   const [error, setError] = useState('');
@@ -55,7 +57,10 @@ export default function Login() {
             boxShadow: 'var(--shadow-lg)'
           }}>S</div>
           <h2 style={{ fontSize: '1.8rem', fontWeight: 700, fontFamily: 'var(--font-display)' }}>Sabha Mandal System</h2>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginTop: '0.25rem' }}>Attendance & Event Portal</p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginTop: '0.25rem' }}>{t('login.subtitle')}</p>
+          <div style={{ marginTop: '0.75rem' }}>
+            <LanguageSwitcher />
+          </div>
         </div>
 
         {error && (
@@ -114,7 +119,7 @@ export default function Login() {
             style={{ width: '100%', padding: '0.85rem', marginTop: '0.5rem' }}
           >
             <Lock size={16} />
-            <span>Sign In</span>
+            <span>{t('login.signIn')}</span>
           </button>
         </form>
 

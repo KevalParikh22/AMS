@@ -35,6 +35,22 @@ export default function Dashboard({ setView, setSelectedEventId }) {
     setView('attendance');
   };
 
+  // Live event-day pulse for the first active event (PRD success metrics)
+  const liveEvent = activeEvents[0] || null;
+  const livePulse = liveEvent ? (() => {
+    const marks = attendance
+      .filter(a => a.eventId === liveEvent.id)
+      .sort((a, b) => new Date(b.markedAt) - new Date(a.markedAt));
+    const fifteenMinAgo = Date.now() - 15 * 60 * 1000;
+    const recentMarks = marks.filter(a => new Date(a.markedAt).getTime() >= fifteenMinAgo).length;
+    const lastMark = marks[0] || null;
+    const lastMarkName = lastMark
+      ? (participants.find(p => p.id === lastMark.participantId)?.name || lastMark.participantId)
+      : null;
+    const pendingCount = participants.filter(p => p.status === 'pending').length;
+    return { total: marks.length, recentMarks, lastMark, lastMarkName, pendingCount };
+  })() : null;
+
   // Helper to calculate attendance stats for a specific event
   const getEventStats = (event) => {
     const scope = event.sabhaMandalScope;
@@ -85,6 +101,46 @@ export default function Dashboard({ setView, setSelectedEventId }) {
           </button>
         )}
       </div>
+
+      {/* Live Event Pulse (event-day operational stats) */}
+      {livePulse && (
+        <div className="glass-panel" style={{ padding: '1.5rem', borderRadius: 'var(--radius-md)', border: '1px solid var(--accent)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1rem' }}>
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0 }}>
+              <Activity size={18} color="var(--accent)" />
+              <span>Live: {liveEvent.name}</span>
+            </h3>
+            <span className="badge badge-success">In Progress</span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem', textAlign: 'center' }}>
+            <div className="card" style={{ padding: '0.9rem' }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Checked In</span>
+              <h4 style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--success)' }}>{livePulse.total}</h4>
+            </div>
+            <div className="card" style={{ padding: '0.9rem' }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Last 15 Minutes</span>
+              <h4 style={{ fontSize: '1.4rem', fontWeight: 700 }}>{livePulse.recentMarks}</h4>
+            </div>
+            <div className="card" style={{ padding: '0.9rem' }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Last Check-in</span>
+              <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginTop: '0.25rem' }}>
+                {livePulse.lastMarkName || '—'}
+              </h4>
+              {livePulse.lastMark && (
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                  {new Date(livePulse.lastMark.markedAt).toLocaleTimeString()}
+                </span>
+              )}
+            </div>
+            <div className="card" style={{ padding: '0.9rem' }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Pending Registrations</span>
+              <h4 style={{ fontSize: '1.4rem', fontWeight: 700, color: livePulse.pendingCount > 0 ? 'var(--warning)' : 'var(--text-primary)' }}>
+                {livePulse.pendingCount}
+              </h4>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Aggregate Stats Cards */}
       <div style={{

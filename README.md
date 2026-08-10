@@ -20,7 +20,10 @@ A mobile-friendly web application for managing event attendance and participant 
 - **Event management** — create/edit events with Draft / Active / Closed statuses, sabha scoping, and shareable public registration links.
 - **Registration** — internal registration desk plus a public shared form (`?view=shared-registration&eventId=...`) that issues a reference code and routes submissions to a review queue.
 - **Reports** — event/sabha filters, present/absent lists, pending-registration approval queue, and Excel export.
-- **Admin settings** — manage sabha and karyakar dropdown values, view audit logs, wipe or factory-reset the database.
+- **Admin settings** — manage sabha and karyakar dropdown values, user accounts and roles, audit logs (search/filter/export), wipe or factory-reset the database.
+- **QR check-in** — participant QR on registration receipts, printable badge sheets, and a camera scanner at the attendance desk (with manual ID fallback).
+- **Offline PWA** — installable to the home screen; the app shell loads without connectivity after the first visit (data is device-local).
+- **Multilingual** — English and Gujarati (ગુજરાતી) with a language switcher; translations live in `src/i18n/translations.js`.
 
 ## Getting started
 

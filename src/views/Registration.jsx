@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useDb } from '../context/DbContext';
 import { useAuth } from '../context/AuthContext';
+import QrCode from '../components/QrCode';
 import {
   UserPlus,
   AlertTriangle,
@@ -173,8 +174,9 @@ export default function Registration({ setView, selectedEventId }) {
             <Check size={18} />
             <span>Registered "{receipt.name}" successfully</span>
           </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'var(--bg-primary)', padding: '0.75rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
-            <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', backgroundColor: 'var(--bg-primary)', padding: '0.75rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
+            <QrCode value={receipt.id} size={84} />
+            <div style={{ flex: 1, minWidth: '180px' }}>
               <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Reference ID: </span>
               <strong style={{ color: 'var(--accent)' }}>{receipt.id}</strong>
               {receipt.markedPresent && (

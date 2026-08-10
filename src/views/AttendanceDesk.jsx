@@ -1,15 +1,135 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useDb } from '../context/DbContext';
 import { useAuth, ROLES } from '../context/AuthContext';
-import { 
-  Search, 
-  Check, 
-  RotateCcw, 
-  UserPlus, 
+import { useLang } from '../i18n/LanguageContext';
+import {
+  Search,
+  Check,
+  RotateCcw,
+  UserPlus,
   AlertTriangle,
   ChevronRight,
-  UserCheck
+  UserCheck,
+  QrCode as QrCodeIcon,
+  X
 } from 'lucide-react';
+
+// Camera QR scanner using the built-in BarcodeDetector API (Chrome/Android).
+// Browsers without it (e.g. iOS Safari) fall back to manual ID entry.
+function QrScannerModal({ onDetect, onClose, feedback, t }) {
+  const videoRef = useRef(null);
+  const [cameraError, setCameraError] = useState('');
+  const [manualId, setManualId] = useState('');
+  const supported = 'BarcodeDetector' in window;
+
+  useEffect(() => {
+    if (!supported) return;
+    let stream = null;
+    let timer = null;
+    let cancelled = false;
+
+    const start = async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' }
+        });
+        if (cancelled) { stream.getTracks().forEach(tr => tr.stop()); return; }
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+        timer = setInterval(async () => {
+          if (!videoRef.current || videoRef.current.readyState < 2) return;
+          try {
+            const codes = await detector.detect(videoRef.current);
+            if (codes.length > 0 && codes[0].rawValue) {
+              onDetect(codes[0].rawValue.trim());
+            }
+          } catch { /* detection can fail transiently; keep polling */ }
+        }, 600);
+      } catch (err) {
+        setCameraError(err.message || 'Camera access denied.');
+      }
+    };
+    start();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+      if (stream) stream.getTracks().forEach(tr => tr.stop());
+    };
+  }, [supported, onDetect]);
+
+  const handleManualSubmit = (e) => {
+    e.preventDefault();
+    if (manualId.trim()) {
+      onDetect(manualId.trim().toUpperCase());
+      setManualId('');
+    }
+  };
+
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+      backgroundColor: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 1000, padding: '1rem'
+    }}>
+      <div className="card glass-panel" style={{ width: '100%', maxWidth: '440px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>{t('desk.scanTitle')}</h3>
+          <button onClick={onClose} className="btn btn-ghost" style={{ padding: '0.35rem' }}>
+            <X size={18} />
+          </button>
+        </div>
+
+        {supported && !cameraError ? (
+          <>
+            <video
+              ref={videoRef}
+              muted
+              playsInline
+              style={{ width: '100%', borderRadius: 'var(--radius-md)', backgroundColor: '#000', aspectRatio: '4 / 3' }}
+            />
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textAlign: 'center', margin: '0.75rem 0' }}>
+              {t('desk.scanHint')}
+            </p>
+          </>
+        ) : (
+          <p style={{ fontSize: '0.85rem', color: 'var(--warning)', margin: '0.5rem 0 1rem' }}>
+            {cameraError || t('desk.scanNotSupported')}
+          </p>
+        )}
+
+        {feedback && (
+          <div
+            className={`badge ${feedback.ok ? 'badge-success' : 'badge-danger'}`}
+            style={{ display: 'block', textAlign: 'center', padding: '0.65rem', marginBottom: '0.75rem', borderRadius: 'var(--radius-sm)' }}
+          >
+            {feedback.message}
+          </div>
+        )}
+
+        <form onSubmit={handleManualSubmit}>
+          <label className="form-label" style={{ fontSize: '0.8rem' }}>{t('desk.scanManual')}</label>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <input
+              type="text"
+              className="form-control"
+              placeholder="P-101"
+              value={manualId}
+              onChange={(e) => setManualId(e.target.value)}
+            />
+            <button type="submit" className="btn btn-primary" style={{ whiteSpace: 'nowrap' }}>
+              {t('desk.scanMark')}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
 
 export default function AttendanceDesk({ setView, selectedEventId, setSelectedEventId }) {
   const {
@@ -22,10 +142,14 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
   } = useDb();
 
   const { user, hasPermission } = useAuth();
+  const { t } = useLang();
   const canCorrectAttendance = hasPermission(ROLES.COORDINATOR);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
+  const [visibleCount, setVisibleCount] = useState(30);
+  const [showScanner, setShowScanner] = useState(false);
+  const [scanFeedback, setScanFeedback] = useState(null);
 
   // Find active events (expired events are effectively closed)
   const activeEvents = events.filter(e => getEffectiveStatus(e) === 'Active');
@@ -41,6 +165,7 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
   useEffect(() => {
     const results = queryParticipants(searchQuery);
     setSearchResults(results);
+    setVisibleCount(30); // Reset pagination on a new search
   }, [searchQuery, queryParticipants]);
 
   const activeEvent = events.find(e => e.id === selectedEventId);
@@ -48,6 +173,24 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
   const handleMarkPresent = (participantId) => {
     if (!selectedEventId) return;
     markPresent(selectedEventId, participantId);
+  };
+
+  // QR scan (or manual ID entry) → look up active participant and check in
+  const handleScannedId = (scannedValue) => {
+    const id = scannedValue.toUpperCase();
+    const match = queryParticipants('').find(r => r.item.id.toUpperCase() === id);
+    if (!match) {
+      setScanFeedback({ ok: false, message: `${id}: not found in the active roster.` });
+      return;
+    }
+    if (!selectedEventId) {
+      setScanFeedback({ ok: false, message: 'Select an active event first.' });
+      return;
+    }
+    const result = markPresent(selectedEventId, match.item.id);
+    setScanFeedback(result.success
+      ? { ok: true, message: `${match.item.name} — ${t('desk.present')} ✓` }
+      : { ok: false, message: `${match.item.name}: ${result.message}` });
   };
 
   const handleUndoPresent = (participantId) => {
@@ -126,7 +269,7 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
           className="swipe-fill"
           style={{ width: `${deltaX + (handleWidth / 2)}px`, transition: isDragging ? 'none' : 'width 0.2s ease-out' }}
         />
-        <div className="swipe-track-label">Swipe to check-in</div>
+        <div className="swipe-track-label">{t('desk.swipeToCheckIn')}</div>
         <div
           className="swipe-handle"
           onMouseDown={onMouseDown}
@@ -157,7 +300,7 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
         gap: '1rem'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flex: 1, minWidth: '280px' }}>
-          <label className="form-label" style={{ margin: 0, whiteSpace: 'nowrap', fontWeight: 600 }}>Active Event:</label>
+          <label className="form-label" style={{ margin: 0, whiteSpace: 'nowrap', fontWeight: 600 }}>{t('desk.activeEvent')}</label>
           {activeEvents.length === 0 ? (
             <span style={{ color: 'var(--danger)', fontSize: '0.9rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
               <AlertTriangle size={16} />
@@ -177,16 +320,37 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
           )}
         </div>
 
-        {/* Quick Registration Shortcut */}
-        <button 
-          onClick={() => setView('registration')} 
-          className="btn btn-secondary"
-          style={{ padding: '0.6rem 1.25rem' }}
-        >
-          <UserPlus size={16} />
-          <span>Register New Person</span>
-        </button>
+        {/* Scan + Quick Registration Shortcuts */}
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button
+            onClick={() => { setScanFeedback(null); setShowScanner(true); }}
+            className="btn btn-primary"
+            style={{ padding: '0.6rem 1.25rem' }}
+            disabled={!activeEvent}
+            title={activeEvent ? t('desk.scanTitle') : 'Select an active event first'}
+          >
+            <QrCodeIcon size={16} />
+            <span>{t('desk.scanQr')}</span>
+          </button>
+          <button
+            onClick={() => setView('registration')}
+            className="btn btn-secondary"
+            style={{ padding: '0.6rem 1.25rem' }}
+          >
+            <UserPlus size={16} />
+            <span>{t('desk.registerNewPerson')}</span>
+          </button>
+        </div>
       </div>
+
+      {showScanner && (
+        <QrScannerModal
+          onDetect={handleScannedId}
+          onClose={() => setShowScanner(false)}
+          feedback={scanFeedback}
+          t={t}
+        />
+      )}
 
       {activeEvent ? (
         <>
@@ -202,7 +366,7 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
             <input
               type="text"
               className="form-control"
-              placeholder="Search by name, phone number, class/sabha..."
+              placeholder={t('desk.searchPlaceholder')}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               style={{
@@ -216,9 +380,9 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
             />
           </div>
 
-          {/* Search Result Grid */}
+          {/* Search Result Grid (capped for large rosters) */}
           <div className="attendance-grid">
-            {searchResults.map(({ item }) => {
+            {searchResults.slice(0, visibleCount).map(({ item }) => {
               const isPresent = attendance.some(
                 a => a.eventId === activeEvent.id && a.participantId === item.id
               );
@@ -243,7 +407,7 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
                       {isPresent && (
                         <span className="badge badge-success" style={{ padding: '0.35rem 0.6rem' }}>
                           <Check size={12} />
-                          <span>Present</span>
+                          <span>{t('desk.present')}</span>
                         </span>
                       )}
                     </div>
@@ -272,7 +436,7 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
                           }}
                         >
                           <RotateCcw size={14} />
-                          <span>Undo Check-in</span>
+                          <span>{t('desk.undoCheckIn')}</span>
                         </button>
                       ) : (
                         <p style={{ marginTop: '1rem', fontSize: '0.75rem', color: 'var(--text-muted)', textAlign: 'center' }}>
@@ -304,6 +468,16 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
                 </div>
               );
             })}
+
+            {searchResults.length > visibleCount && (
+              <button
+                onClick={() => setVisibleCount(c => c + 30)}
+                className="btn btn-secondary"
+                style={{ gridColumn: '1 / -1', padding: '0.75rem' }}
+              >
+                {t('desk.showMore')} ({searchResults.length - visibleCount})
+              </button>
+            )}
 
             {searchResults.length === 0 && (
               <div style={{

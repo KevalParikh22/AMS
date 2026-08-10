@@ -1,0 +1,17 @@
+{
+  "name": "Sabha Mandal Attendance & Event Registration System",
+  "short_name": "Sabha AMS",
+  "description": "Mark event attendance, register participants, and manage sabha rosters — works offline at the venue.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0f19",
+  "theme_color": "#e87817",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

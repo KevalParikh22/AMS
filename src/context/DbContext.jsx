@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth, ROLES } from './AuthContext';
 
 const DbContext = createContext();
@@ -293,7 +293,8 @@ export const DbProvider = ({ children }) => {
   // Participant search with basic text ranking/fuzzy score matching.
   // Only active records (approved/pending) are searchable — rejected,
   // linked, and archived participants never appear at the desk.
-  const queryParticipants = (searchString) => {
+  // Memoized so consumers' effects only re-run when the roster changes.
+  const queryParticipants = useCallback((searchString) => {
     const searchable = participants.filter(p => p.status === 'approved' || p.status === 'pending');
     if (!searchString || !searchString.trim()) {
       return searchable.map(p => ({ item: p, score: 100 }));
@@ -323,7 +324,7 @@ export const DbProvider = ({ children }) => {
     })
     .filter(match => match.score > 0)
     .sort((a, b) => b.score - a.score);
-  };
+  }, [participants]);
 
   // Register or insert spreadsheet imports (Admin only, per decision D4)
   const importExcelData = (parsedRows) => {
