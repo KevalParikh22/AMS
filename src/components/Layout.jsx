@@ -61,7 +61,7 @@ export default function Layout({ children, currentView, setView }) {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           <div style={{
-            background: 'linear-gradient(135deg, var(--accent), #4f46e5)',
+            background: 'linear-gradient(135deg, var(--accent), var(--accent-secondary))',
             width: '32px',
             height: '32px',
             borderRadius: 'var(--radius-sm)',
@@ -104,7 +104,7 @@ export default function Layout({ children, currentView, setView }) {
             borderBottom: '1px solid var(--border-color)'
           }}>
             <div style={{
-              background: 'linear-gradient(135deg, var(--accent), #4f46e5)',
+              background: 'linear-gradient(135deg, var(--accent), var(--accent-secondary))',
               width: '40px',
               height: '40px',
               borderRadius: 'var(--radius-md)',

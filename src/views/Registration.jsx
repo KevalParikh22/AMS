@@ -1,22 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { useDb } from '../context/DbContext';
 import { useAuth } from '../context/AuthContext';
-import { 
-  UserPlus, 
-  AlertTriangle, 
-  Check, 
+import {
+  UserPlus,
+  AlertTriangle,
+  Check,
   HelpCircle,
+  Copy,
   Link as LinkIcon
 } from 'lucide-react';
 
 export default function Registration({ setView, selectedEventId }) {
-  const { 
-    sabhas, 
-    karyakars, 
-    participants, 
-    registerNewParticipant, 
+  const {
+    sabhas,
+    karyakars,
+    participants,
+    registerNewParticipant,
     markPresent,
-    events
+    events,
+    getEffectiveStatus
   } = useDb();
 
   const { user } = useAuth();
@@ -33,18 +35,24 @@ export default function Registration({ setView, selectedEventId }) {
   const [duplicates, setDuplicates] = useState([]);
   const [showDuplicateModal, setShowDuplicateModal] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
+  const [receipt, setReceipt] = useState(null);
+  const [copiedRef, setCopiedRef] = useState(false);
 
-  // Find active event
-  const activeEvent = events.find(e => e.id === selectedEventId) || events.find(e => e.status === 'Active');
+  // Find active event (effective status so expired events don't qualify)
+  const candidateEvent = events.find(e => e.id === selectedEventId) || events.find(e => getEffectiveStatus(e) === 'Active');
+  const activeEvent = candidateEvent && getEffectiveStatus(candidateEvent) === 'Active' ? candidateEvent : null;
 
   useEffect(() => {
-    if (sabhas.length > 0) {
+    if (sabhas.length > 0 && !sabha) {
       setSabha(sabhas[0]);
     }
-    if (karyakars.length > 0) {
-      setKaryakar(karyakars[0]);
-    }
-  }, [sabhas, karyakars]);
+  }, [sabhas]);
+
+  // Karyakars are mapped to sabhas: picking a sabha auto-selects its karyakar
+  const mappedKaryakars = karyakars.filter(k => k.sabha === sabha);
+  useEffect(() => {
+    setKaryakar(mappedKaryakars[0]?.name || 'None Assigned');
+  }, [sabha, karyakars]);
 
   // Run duplicate check on submit
   const handleSubmit = (e) => {
@@ -55,9 +63,9 @@ export default function Registration({ setView, selectedEventId }) {
     const queryName = name.toLowerCase().trim();
     const queryPhone = phone.trim();
 
-    const matches = participants.filter(p => 
-      p.phone === queryPhone || 
-      p.name.toLowerCase().trim() === queryName
+    const matches = participants.filter(p =>
+      (p.status === 'approved' || p.status === 'pending') &&
+      (p.phone === queryPhone || p.name.toLowerCase().trim() === queryName)
     );
 
     if (matches.length > 0) {
@@ -77,23 +85,33 @@ export default function Registration({ setView, selectedEventId }) {
       karyakar,
       guardianDetails,
       pendingReview: false // Internal registrations are approved immediately
+    }, activeEvent ? activeEvent.id : null);
+
+    // Attendance is only marked on the volunteer's explicit confirmation (checkbox)
+    const marked = markPresentImmediately && activeEvent
+      ? markPresent(activeEvent.id, newParticipant.id).success
+      : false;
+
+    setReceipt({
+      id: newParticipant.id,
+      name: newParticipant.name,
+      markedPresent: marked,
+      eventName: marked ? activeEvent.name : null
     });
 
-    if (markPresentImmediately && activeEvent) {
-      markPresent(activeEvent.id, newParticipant.id);
-    }
-
-    setSuccessMsg(`Registered "${name}" successfully! ID: ${newParticipant.id}`);
-    
     // Clear form
     setName('');
     setPhone('');
     setGuardianDetails('');
     setShowDuplicateModal(false);
-    
-    setTimeout(() => {
-      setSuccessMsg('');
-    }, 4000);
+  };
+
+  const handleCopyReference = () => {
+    if (!receipt) return;
+    navigator.clipboard.writeText(`Registration Reference: ${receipt.id} | Name: ${receipt.name}`).then(() => {
+      setCopiedRef(true);
+      setTimeout(() => setCopiedRef(false), 2000);
+    });
   };
 
   // Skip duplicate warning and force create
@@ -136,6 +154,44 @@ export default function Registration({ setView, selectedEventId }) {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
             <Check size={18} />
             <span>{successMsg}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Registration Reference Receipt (PRD FR-4: shareable reference for every registration) */}
+      {receipt && (
+        <div className="glass-panel animate-fade-in" style={{
+          padding: '1.25rem',
+          borderRadius: 'var(--radius-md)',
+          marginBottom: '1.5rem',
+          border: '1px solid var(--success)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.75rem'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--success)', fontWeight: 600 }}>
+            <Check size={18} />
+            <span>Registered "{receipt.name}" successfully</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'var(--bg-primary)', padding: '0.75rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
+            <div>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Reference ID: </span>
+              <strong style={{ color: 'var(--accent)' }}>{receipt.id}</strong>
+              {receipt.markedPresent && (
+                <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginLeft: '0.75rem' }}>
+                  Marked present: <strong>{receipt.eventName}</strong>
+                </span>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button onClick={handleCopyReference} className="btn btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
+                {copiedRef ? <Check size={12} /> : <Copy size={12} />}
+                <span>{copiedRef ? 'Copied' : 'Copy Reference'}</span>
+              </button>
+              <button onClick={() => setReceipt(null)} className="btn btn-ghost" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
+                Dismiss
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -202,16 +258,26 @@ export default function Registration({ setView, selectedEventId }) {
             </div>
             
             <div className="form-group">
-              <label className="form-label">Responsible Karyakar *</label>
-              <select 
-                className="form-control" 
-                value={karyakar} 
-                onChange={(e) => setKaryakar(e.target.value)}
-              >
-                {karyakars.map(k => (
-                  <option key={k} value={k}>{k}</option>
-                ))}
-              </select>
+              <label className="form-label">Responsible Karyakar</label>
+              {mappedKaryakars.length > 1 ? (
+                <select
+                  className="form-control"
+                  value={karyakar}
+                  onChange={(e) => setKaryakar(e.target.value)}
+                >
+                  {mappedKaryakars.map(k => (
+                    <option key={k.name} value={k.name}>{k.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  className="form-control"
+                  value={karyakar}
+                  disabled
+                  title="Auto-assigned from the selected sabha's karyakar mapping"
+                />
+              )}
             </div>
           </div>
 

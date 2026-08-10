@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 
 export default function EventManagement() {
-  const { events, addEvent, updateEvent, sabhas } = useDb();
+  const { events, addEvent, updateEvent, sabhas, getEffectiveStatus, isEventExpired } = useDb();
   
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [copiedEventId, setCopiedEventId] = useState(null);
@@ -63,10 +63,11 @@ export default function EventManagement() {
   };
 
   const toggleEventStatus = (event) => {
+    const current = getEffectiveStatus(event);
     let nextStatus = 'Draft';
-    if (event.status === 'Draft') nextStatus = 'Active';
-    else if (event.status === 'Active') nextStatus = 'Closed';
-    else if (event.status === 'Closed') nextStatus = 'Active'; // Reopen
+    if (current === 'Draft') nextStatus = 'Active';
+    else if (current === 'Active') nextStatus = 'Closed';
+    else if (current === 'Closed') nextStatus = 'Active'; // Reopen
 
     updateEvent(event.id, { status: nextStatus });
   };
@@ -216,9 +217,11 @@ export default function EventManagement() {
         gap: '1.5rem'
       }}>
         {events.map((event) => {
-          const isClosed = event.status === 'Closed';
-          const isActive = event.status === 'Active';
-          const isDraft = event.status === 'Draft';
+          const effectiveStatus = getEffectiveStatus(event);
+          const expired = isEventExpired(event);
+          const isClosed = effectiveStatus === 'Closed';
+          const isActive = effectiveStatus === 'Active';
+          const isDraft = effectiveStatus === 'Draft';
           
           return (
             <div key={event.id} className="card" style={{
@@ -238,7 +241,7 @@ export default function EventManagement() {
                   <span className={`badge ${
                     isActive ? 'badge-success' : isClosed ? 'badge-danger' : 'badge-warning'
                   }`}>
-                    {event.status}
+                    {isClosed && expired ? 'Closed (Expired)' : effectiveStatus}
                   </span>
                 </div>
 
@@ -271,11 +274,12 @@ export default function EventManagement() {
               }}>
                 <div style={{ display: 'flex', gap: '0.35rem' }}>
                   {/* Status Toggle Control */}
-                  <button 
+                  <button
                     onClick={() => toggleEventStatus(event)}
                     className="btn btn-secondary"
                     style={{ padding: '0.45rem 0.75rem', fontSize: '0.8rem' }}
-                    title={isDraft ? 'Activate Event' : isActive ? 'Close Event' : 'Reopen Event'}
+                    disabled={isClosed && expired}
+                    title={isClosed && expired ? 'Event has passed its end time and cannot be reopened' : isDraft ? 'Activate Event' : isActive ? 'Close Event' : 'Reopen Event'}
                   >
                     {isDraft && <Play size={12} />}
                     {isActive && <Archive size={12} />}

@@ -1,15 +1,18 @@
 import React, { useState } from 'react';
 import { useDb } from '../context/DbContext';
-import { useAuth } from '../context/AuthContext';
-import { 
-  Trash2, 
-  Plus, 
-  Database, 
-  RotateCcw, 
-  Layers, 
-  Users, 
+import { useAuth, ROLES } from '../context/AuthContext';
+import * as XLSX from 'xlsx';
+import {
+  Trash2,
+  Plus,
+  Database,
+  RotateCcw,
+  Layers,
+  Users,
   ShieldAlert,
-  ClipboardList
+  ClipboardList,
+  UserCog,
+  Download
 } from 'lucide-react';
 
 export default function AdminSettings() {
@@ -24,14 +27,78 @@ export default function AdminSettings() {
     addAuditLog
   } = useDb();
 
-  const { user } = useAuth();
+  const { user, users, addManagedUser, setManagedUserEnabled } = useAuth();
 
   // Lookup Entry Forms
   const [newSabha, setNewSabha] = useState('');
   const [newKaryakar, setNewKaryakar] = useState('');
-  
+  const [newKaryakarSabha, setNewKaryakarSabha] = useState('');
+
+  // User management form
+  const [newUserName, setNewUserName] = useState('');
+  const [newUserUsername, setNewUserUsername] = useState('');
+  const [newUserRole, setNewUserRole] = useState(ROLES.ATTENDANCE_VOLUNTEER);
+  const [userMsg, setUserMsg] = useState('');
+
+  // Audit log filters
+  const [logSearch, setLogSearch] = useState('');
+  const [logActionFilter, setLogActionFilter] = useState('All');
+
   // Status Messages
   const [dbSuccess, setDbSuccess] = useState('');
+
+  const handleAddUser = (e) => {
+    e.preventDefault();
+    const result = addManagedUser(newUserName, newUserUsername, newUserRole);
+    if (result.success) {
+      addAuditLog('User Account Created', `Created user "${newUserName}" (@${result.username}) with role: ${newUserRole}.`);
+      setUserMsg(`User @${result.username} created.`);
+      setNewUserName('');
+      setNewUserUsername('');
+    } else {
+      setUserMsg(result.message);
+    }
+    setTimeout(() => setUserMsg(''), 3500);
+  };
+
+  const handleToggleUser = (u) => {
+    const result = setManagedUserEnabled(u.username, !u.enabled);
+    if (result.success) {
+      addAuditLog(
+        u.enabled ? 'User Account Disabled' : 'User Account Enabled',
+        `${u.enabled ? 'Disabled' : 'Enabled'} account @${u.username} (${u.name}).`
+      );
+    } else {
+      setUserMsg(result.message);
+      setTimeout(() => setUserMsg(''), 3500);
+    }
+  };
+
+  // Audit filtering
+  const actionTypes = ['All', ...new Set(auditLogs.map(l => l.action))];
+  const filteredLogs = auditLogs.filter(log => {
+    if (logActionFilter !== 'All' && log.action !== logActionFilter) return false;
+    if (logSearch.trim()) {
+      const q = logSearch.toLowerCase();
+      return log.action.toLowerCase().includes(q) ||
+        log.details.toLowerCase().includes(q) ||
+        String(log.userId).toLowerCase().includes(q);
+    }
+    return true;
+  });
+
+  const handleExportAuditLog = () => {
+    const ws = XLSX.utils.json_to_sheet(filteredLogs.map(log => ({
+      'Timestamp': new Date(log.timestamp).toLocaleString(),
+      'Action': log.action,
+      'User': log.userId,
+      'Role': log.userRole,
+      'Details': log.details
+    })));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Audit Log');
+    XLSX.writeFile(wb, 'Audit_Log.xlsx');
+  };
 
   const handleAddSabha = (e) => {
     e.preventDefault();
@@ -54,18 +121,20 @@ export default function AdminSettings() {
 
   const handleAddKaryakar = (e) => {
     e.preventDefault();
-    if (!newKaryakar.trim()) return;
-    if (karyakars.includes(newKaryakar.trim())) return;
+    const name = newKaryakar.trim();
+    if (!name) return;
+    if (karyakars.some(k => k.name === name)) return;
 
-    const updated = [...karyakars, newKaryakar.trim()];
+    const sabhaAssignment = newKaryakarSabha || sabhas[0] || 'Unassigned';
+    const updated = [...karyakars, { name, sabha: sabhaAssignment }];
     setKaryakars(updated);
     localStorage.setItem('ams_karyakars', JSON.stringify(updated));
-    addAuditLog('Add Karyakar Profile', `Added new Karyakar: "${newKaryakar.trim()}"`);
+    addAuditLog('Add Karyakar Profile', `Added new Karyakar: "${name}" mapped to sabha: "${sabhaAssignment}"`);
     setNewKaryakar('');
   };
 
   const handleRemoveKaryakar = (name) => {
-    const updated = karyakars.filter(k => k !== name);
+    const updated = karyakars.filter(k => k.name !== name);
     setKaryakars(updated);
     localStorage.setItem('ams_karyakars', JSON.stringify(updated));
     addAuditLog('Remove Karyakar Profile', `Removed Karyakar: "${name}"`);
@@ -154,23 +223,36 @@ export default function AdminSettings() {
             <span>Manage Karyakars (Mentors)</span>
           </h3>
 
-          <form onSubmit={handleAddKaryakar} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
-            <input 
-              type="text" 
-              className="form-control" 
-              placeholder="e.g. Rajesh Patel" 
-              value={newKaryakar}
-              onChange={(e) => setNewKaryakar(e.target.value)}
-              required
-            />
-            <button type="submit" className="btn btn-primary" style={{ padding: '0.6rem 1rem' }}>
-              <Plus size={16} />
-            </button>
+          <form onSubmit={handleAddKaryakar} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <input
+                type="text"
+                className="form-control"
+                placeholder="e.g. Rajesh Patel"
+                value={newKaryakar}
+                onChange={(e) => setNewKaryakar(e.target.value)}
+                required
+              />
+              <button type="submit" className="btn btn-primary" style={{ padding: '0.6rem 1rem' }}>
+                <Plus size={16} />
+              </button>
+            </div>
+            <select
+              className="form-control"
+              value={newKaryakarSabha}
+              onChange={(e) => setNewKaryakarSabha(e.target.value)}
+              title="Sabha this karyakar is responsible for"
+            >
+              <option value="">Map to sabha: {sabhas[0] || 'Unassigned'} (default)</option>
+              {sabhas.map(s => (
+                <option key={s} value={s}>Map to sabha: {s}</option>
+              ))}
+            </select>
           </form>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '200px', overflowY: 'auto' }}>
             {karyakars.map(k => (
-              <div key={k} style={{
+              <div key={k.name} style={{
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
@@ -179,10 +261,13 @@ export default function AdminSettings() {
                 border: '1px solid var(--border-color)',
                 borderRadius: 'var(--radius-sm)'
               }}>
-                <span style={{ fontSize: '0.875rem' }}>{k}</span>
-                <button 
-                  onClick={() => handleRemoveKaryakar(k)}
-                  className="btn btn-ghost" 
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ fontSize: '0.875rem' }}>{k.name}</span>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{k.sabha}</span>
+                </div>
+                <button
+                  onClick={() => handleRemoveKaryakar(k.name)}
+                  className="btn btn-ghost"
                   style={{ padding: '0.25rem', color: 'var(--danger)' }}
                 >
                   <Trash2 size={14} />
@@ -190,6 +275,85 @@ export default function AdminSettings() {
               </div>
             ))}
           </div>
+        </div>
+      </div>
+
+      {/* User Account Management */}
+      <div className="glass-panel" style={{ padding: '1.5rem', borderRadius: 'var(--radius-md)' }}>
+        <h3 style={{ fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+          <UserCog size={18} color="var(--accent)" />
+          <span>User Accounts & Roles</span>
+        </h3>
+        <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
+          Create volunteer/coordinator accounts and disable access when someone leaves. (Passwords arrive with the backend phase.)
+        </p>
+
+        {userMsg && (
+          <div className="badge badge-info" style={{ display: 'block', padding: '0.6rem', marginBottom: '1rem', borderRadius: 'var(--radius-sm)' }}>
+            {userMsg}
+          </div>
+        )}
+
+        <form onSubmit={handleAddUser} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem', alignItems: 'end' }}>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">Full Name</label>
+            <input type="text" className="form-control" placeholder="e.g. Mehul Trivedi" value={newUserName} onChange={(e) => setNewUserName(e.target.value)} required />
+          </div>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">Username</label>
+            <input type="text" className="form-control" placeholder="e.g. mehul_t" value={newUserUsername} onChange={(e) => setNewUserUsername(e.target.value)} required />
+          </div>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">Role</label>
+            <select className="form-control" value={newUserRole} onChange={(e) => setNewUserRole(e.target.value)}>
+              {Object.values(ROLES).map(r => (
+                <option key={r} value={r}>{r}</option>
+              ))}
+            </select>
+          </div>
+          <button type="submit" className="btn btn-primary" style={{ padding: '0.6rem 1rem' }}>
+            <Plus size={16} />
+            <span>Add User</span>
+          </button>
+        </form>
+
+        <div className="table-container">
+          <table className="custom-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Username</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map(u => (
+                <tr key={u.username} style={{ opacity: u.enabled ? 1 : 0.55 }}>
+                  <td style={{ fontWeight: 600 }}>{u.name}</td>
+                  <td style={{ color: 'var(--text-muted)' }}>@{u.username}</td>
+                  <td>{u.role}</td>
+                  <td>
+                    <span className={`badge ${u.enabled ? 'badge-success' : 'badge-danger'}`}>
+                      {u.enabled ? 'Active' : 'Disabled'}
+                    </span>
+                  </td>
+                  <td>
+                    <button
+                      onClick={() => handleToggleUser(u)}
+                      className="btn btn-ghost"
+                      style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem', color: u.enabled ? 'var(--danger)' : 'var(--success)' }}
+                      disabled={u.username === user?.username}
+                      title={u.username === user?.username ? 'You cannot disable your own account' : (u.enabled ? 'Disable account' : 'Enable account')}
+                    >
+                      {u.enabled ? 'Disable' : 'Enable'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -217,11 +381,37 @@ export default function AdminSettings() {
 
       {/* Complete Audit Logs Grid view */}
       <div className="glass-panel" style={{ padding: '1.5rem', borderRadius: 'var(--radius-md)' }}>
-        <h3 style={{ fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-          <ClipboardList size={18} color="var(--accent)" />
-          <span>System Audit Logbook</span>
-        </h3>
-        
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}>
+          <h3 style={{ fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0 }}>
+            <ClipboardList size={18} color="var(--accent)" />
+            <span>System Audit Logbook</span>
+          </h3>
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <input
+              type="text"
+              className="form-control"
+              placeholder="Search logs..."
+              value={logSearch}
+              onChange={(e) => setLogSearch(e.target.value)}
+              style={{ width: '200px', padding: '0.45rem 0.75rem', fontSize: '0.85rem' }}
+            />
+            <select
+              className="form-control"
+              value={logActionFilter}
+              onChange={(e) => setLogActionFilter(e.target.value)}
+              style={{ width: 'auto', padding: '0.45rem 0.75rem', fontSize: '0.85rem' }}
+            >
+              {actionTypes.map(a => (
+                <option key={a} value={a}>{a === 'All' ? 'All Actions' : a}</option>
+              ))}
+            </select>
+            <button onClick={handleExportAuditLog} className="btn btn-secondary" style={{ padding: '0.45rem 0.9rem', fontSize: '0.85rem' }} disabled={filteredLogs.length === 0}>
+              <Download size={14} />
+              <span>Export</span>
+            </button>
+          </div>
+        </div>
+
         <div className="table-container" style={{ maxHeight: '350px', overflowY: 'auto' }}>
           <table className="custom-table">
             <thead>
@@ -233,7 +423,7 @@ export default function AdminSettings() {
               </tr>
             </thead>
             <tbody>
-              {auditLogs.map((log) => (
+              {filteredLogs.map((log) => (
                 <tr key={log.id}>
                   <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
                     {new Date(log.timestamp).toLocaleString()}
@@ -245,10 +435,10 @@ export default function AdminSettings() {
                   <td style={{ fontSize: '0.825rem', color: 'var(--text-secondary)' }}>{log.details}</td>
                 </tr>
               ))}
-              {auditLogs.length === 0 && (
+              {filteredLogs.length === 0 && (
                 <tr>
                   <td colSpan={4} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
-                    No audit records registered.
+                    No audit records match the current filter.
                   </td>
                 </tr>
               )}

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { useAuth } from './AuthContext';
+import { useAuth, ROLES } from './AuthContext';
 
 const DbContext = createContext();
 
@@ -13,13 +13,15 @@ const INITIAL_SABHAS = [
   'Yuva Mandal - Youth'
 ];
 
+// Each karyakar is mapped to their mandal/sabha so forms need a single pick;
+// search still matches both the sabha and karyakar text on participants.
 const INITIAL_KARYAKARS = [
-  'Ghanshyam Patel',
-  'Pramukh Swami Das',
-  'Akshar Patel',
-  'Mukund Dave',
-  'Yogi Joshi',
-  'Nilkanth Sharma'
+  { name: 'Ghanshyam Patel', sabha: 'Bal Sabha - Sub-group A1' },
+  { name: 'Pramukh Swami Das', sabha: 'Bal Sabha - Sub-group B1' },
+  { name: 'Akshar Patel', sabha: 'Kishore Mandal - East Wing' },
+  { name: 'Mukund Dave', sabha: 'Bal Sabha - Sub-group A2' },
+  { name: 'Yogi Joshi', sabha: 'Kishore Mandal - West Wing' },
+  { name: 'Nilkanth Sharma', sabha: 'Yuva Mandal - Youth' }
 ];
 
 const INITIAL_PARTICIPANTS = [
@@ -32,7 +34,7 @@ const INITIAL_PARTICIPANTS = [
     guardianDetails: 'Manish Patel (Father) - 9876543211',
     createdAt: '2026-08-01T10:00:00Z',
     isNewRegistration: false,
-    pendingReview: false
+    status: 'approved'
   },
   {
     id: 'P-102',
@@ -43,7 +45,7 @@ const INITIAL_PARTICIPANTS = [
     guardianDetails: 'Kiran Shah (Mother) - 9823456780',
     createdAt: '2026-08-01T10:05:00Z',
     isNewRegistration: false,
-    pendingReview: false
+    status: 'approved'
   },
   {
     id: 'P-103',
@@ -54,7 +56,7 @@ const INITIAL_PARTICIPANTS = [
     guardianDetails: 'Rajesh Dave (Father) - 9765432100',
     createdAt: '2026-08-02T11:00:00Z',
     isNewRegistration: false,
-    pendingReview: false
+    status: 'approved'
   },
   {
     id: 'P-104',
@@ -65,7 +67,7 @@ const INITIAL_PARTICIPANTS = [
     guardianDetails: 'Sanjay Parmar (Father) - 9123456780',
     createdAt: '2026-08-03T09:00:00Z',
     isNewRegistration: false,
-    pendingReview: false
+    status: 'approved'
   },
   {
     id: 'P-105',
@@ -76,7 +78,7 @@ const INITIAL_PARTICIPANTS = [
     guardianDetails: 'Vijay Sharma (Father) - 9988776650',
     createdAt: '2026-08-04T12:00:00Z',
     isNewRegistration: false,
-    pendingReview: false
+    status: 'approved'
   },
   {
     id: 'P-106',
@@ -87,7 +89,7 @@ const INITIAL_PARTICIPANTS = [
     guardianDetails: 'Anita Joshi (Mother) - 9012345670',
     createdAt: '2026-08-05T14:00:00Z',
     isNewRegistration: false,
-    pendingReview: false
+    status: 'approved'
   }
 ];
 
@@ -132,8 +134,34 @@ const INITIAL_ATTENDANCE = [
   }
 ];
 
+// An event is expired once the current time passes its end date+time (PRD FR-6)
+const isEventExpired = (event) => {
+  if (!event || !event.date) return false;
+  const end = new Date(`${event.date}T${event.endTime || '23:59'}`);
+  return !isNaN(end.getTime()) && Date.now() > end.getTime();
+};
+
+// Effective status treats expired Active/Draft events as Closed
+const getEffectiveStatus = (event) => {
+  if (!event) return 'Closed';
+  if (event.status === 'Closed') return 'Closed';
+  return isEventExpired(event) ? 'Closed' : event.status;
+};
+
+// Monotonic ID sequence persisted in localStorage so deletions never cause reuse
+const nextSeqId = (prefix, counterKey, list) => {
+  const stored = parseInt(localStorage.getItem(counterKey) || '0', 10) || 0;
+  const maxExisting = list.reduce((max, item) => {
+    const n = parseInt(String(item.id).replace(prefix, ''), 10);
+    return Number.isFinite(n) ? Math.max(max, n) : max;
+  }, 100);
+  const next = Math.max(stored, maxExisting) + 1;
+  localStorage.setItem(counterKey, String(next));
+  return prefix + next;
+};
+
 export const DbProvider = ({ children }) => {
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
   
   // Local Database States
   const [participants, setParticipants] = useState([]);
@@ -152,17 +180,46 @@ export const DbProvider = ({ children }) => {
     const db_karyakars = localStorage.getItem('ams_karyakars');
     const db_logs = localStorage.getItem('ams_audit_logs');
 
-    if (db_participants) setParticipants(JSON.parse(db_participants));
-    else {
-      setParticipants(INITIAL_PARTICIPANTS);
-      localStorage.setItem('ams_participants', JSON.stringify(INITIAL_PARTICIPANTS));
-    }
+    // Participant lifecycle: status is 'approved' | 'pending' | 'rejected' | 'linked' | 'archived'.
+    // Migrate legacy records that used pendingReview flags, "[REJECTED]" name
+    // prefixes, or "LINKED-" id rewrites into explicit statuses.
+    let loadedParticipants = db_participants ? JSON.parse(db_participants) : INITIAL_PARTICIPANTS;
+    loadedParticipants = loadedParticipants.map(p => {
+      if (p.status) return p;
+      let status = 'approved';
+      let name = p.name;
+      if (p.pendingReview) status = 'pending';
+      else if (String(p.name).startsWith('[REJECTED] ')) {
+        status = 'rejected';
+        name = String(p.name).replace('[REJECTED] ', '');
+      }
+      else if (String(p.id).startsWith('LINKED-')) status = 'linked';
+      const { pendingReview, ...rest } = p;
+      return { ...rest, name, status };
+    });
+    setParticipants(loadedParticipants);
+    localStorage.setItem('ams_participants', JSON.stringify(loadedParticipants));
 
-    if (db_events) setEvents(JSON.parse(db_events));
-    else {
-      setEvents(INITIAL_EVENTS);
-      localStorage.setItem('ams_events', JSON.stringify(INITIAL_EVENTS));
+    let loadedEvents = db_events ? JSON.parse(db_events) : INITIAL_EVENTS;
+    // Auto-close sweep: persist Closed status for events past their end date/time
+    const expired = loadedEvents.filter(e => e.status !== 'Closed' && isEventExpired(e));
+    if (expired.length > 0) {
+      loadedEvents = loadedEvents.map(e =>
+        expired.some(x => x.id === e.id) ? { ...e, status: 'Closed' } : e
+      );
+      const closeLog = {
+        id: 'L-' + Date.now(),
+        action: 'Event Auto-Close',
+        timestamp: new Date().toISOString(),
+        userId: 'system',
+        userRole: 'System',
+        details: `Automatically closed ${expired.length} event(s) past their end time: ${expired.map(e => `${e.name} (${e.id})`).join(', ')}.`
+      };
+      const existingLogs = db_logs ? JSON.parse(db_logs) : [];
+      localStorage.setItem('ams_audit_logs', JSON.stringify([closeLog, ...existingLogs]));
     }
+    setEvents(loadedEvents);
+    localStorage.setItem('ams_events', JSON.stringify(loadedEvents));
 
     if (db_attendance) setAttendance(JSON.parse(db_attendance));
     else {
@@ -176,13 +233,26 @@ export const DbProvider = ({ children }) => {
       localStorage.setItem('ams_sabhas', JSON.stringify(INITIAL_SABHAS));
     }
 
-    if (db_karyakars) setKaryakars(JSON.parse(db_karyakars));
+    if (db_karyakars) {
+      let loadedKaryakars = JSON.parse(db_karyakars);
+      // Migrate legacy plain-string entries to { name, sabha } objects
+      if (loadedKaryakars.length > 0 && typeof loadedKaryakars[0] === 'string') {
+        loadedKaryakars = loadedKaryakars.map(name => {
+          const known = INITIAL_KARYAKARS.find(k => k.name === name);
+          return { name, sabha: known ? known.sabha : 'Unassigned' };
+        });
+        localStorage.setItem('ams_karyakars', JSON.stringify(loadedKaryakars));
+      }
+      setKaryakars(loadedKaryakars);
+    }
     else {
       setKaryakars(INITIAL_KARYAKARS);
       localStorage.setItem('ams_karyakars', JSON.stringify(INITIAL_KARYAKARS));
     }
 
-    if (db_logs) setAuditLogs(JSON.parse(db_logs));
+    // Re-read logs since the auto-close sweep above may have prepended an entry
+    const freshLogs = localStorage.getItem('ams_audit_logs');
+    if (freshLogs) setAuditLogs(JSON.parse(freshLogs));
     else {
       const initLog = [{
         id: 'L-1',
@@ -220,15 +290,18 @@ export const DbProvider = ({ children }) => {
     });
   };
 
-  // Participant search with basic text ranking/fuzzy score matching
+  // Participant search with basic text ranking/fuzzy score matching.
+  // Only active records (approved/pending) are searchable — rejected,
+  // linked, and archived participants never appear at the desk.
   const queryParticipants = (searchString) => {
+    const searchable = participants.filter(p => p.status === 'approved' || p.status === 'pending');
     if (!searchString || !searchString.trim()) {
-      return participants.map(p => ({ item: p, score: 100 }));
+      return searchable.map(p => ({ item: p, score: 100 }));
     }
-    
+
     const query = searchString.toLowerCase().trim();
     
-    return participants.map(p => {
+    return searchable.map(p => {
       let score = 0;
       const name = p.name.toLowerCase();
       const phone = p.phone.toLowerCase();
@@ -252,47 +325,87 @@ export const DbProvider = ({ children }) => {
     .sort((a, b) => b.score - a.score);
   };
 
-  // Register or insert spreadsheet imports
+  // Register or insert spreadsheet imports (Admin only, per decision D4)
   const importExcelData = (parsedRows) => {
+    if (!hasPermission(ROLES.ADMIN)) {
+      return { error: 'Only administrators can import master data.' };
+    }
     let inserted = 0;
     let updated = 0;
+    let unchanged = 0;
     let rejected = 0;
+    let review = 0;
+    let duplicates = 0;
     const newParticipantsList = [...participants];
+    const seenPhonesInFile = new Set();
 
     parsedRows.forEach(row => {
-      if (!row.name || !row.phone) {
+      const name = String(row.name || '').trim();
+      const phone = String(row.phone || '').trim();
+
+      if (!name) {
         rejected++;
         return;
       }
 
-      // Check if phone already exists
-      const existingIdx = newParticipantsList.findIndex(
-        p => p.phone.trim() === String(row.phone).trim()
-      );
-
-      if (existingIdx > -1) {
-        // Update existing record
-        newParticipantsList[existingIdx] = {
-          ...newParticipantsList[existingIdx],
-          name: row.name || newParticipantsList[existingIdx].name,
-          sabha: row.sabha || newParticipantsList[existingIdx].sabha,
-          karyakar: row.karyakar || newParticipantsList[existingIdx].karyakar,
-          guardianDetails: row.guardianDetails || newParticipantsList[existingIdx].guardianDetails
-        };
-        updated++;
-      } else {
-        // Create new record
-        const newId = 'P-' + (100 + newParticipantsList.length + 1);
+      // No phone = no unique identifier: create flagged for manual review (decision D3)
+      if (!phone) {
         newParticipantsList.push({
-          id: newId,
-          name: row.name,
-          phone: String(row.phone),
+          id: nextSeqId('P-', 'ams_seq_participant', newParticipantsList),
+          name,
+          phone: '',
           sabha: row.sabha || 'Unassociated',
           karyakar: row.karyakar || 'None Assigned',
           guardianDetails: row.guardianDetails || '',
           createdAt: new Date().toISOString(),
           isNewRegistration: false,
-          pendingReview: false
+          status: 'pending'
+        });
+        review++;
+        return;
+      }
+
+      // Duplicate row within the same file: skip so the first occurrence wins
+      if (seenPhonesInFile.has(phone)) {
+        duplicates++;
+        return;
+      }
+      seenPhonesInFile.add(phone);
+
+      const existingIdx = newParticipantsList.findIndex(
+        p => p.phone.trim() === phone && (p.status === 'approved' || p.status === 'pending')
+      );
+
+      if (existingIdx > -1) {
+        const existing = newParticipantsList[existingIdx];
+        const merged = {
+          ...existing,
+          name: name || existing.name,
+          sabha: row.sabha || existing.sabha,
+          karyakar: row.karyakar || existing.karyakar,
+          guardianDetails: row.guardianDetails || existing.guardianDetails
+        };
+        const isSame = merged.name === existing.name &&
+          merged.sabha === existing.sabha &&
+          merged.karyakar === existing.karyakar &&
+          merged.guardianDetails === existing.guardianDetails;
+        if (isSame) {
+          unchanged++;
+        } else {
+          newParticipantsList[existingIdx] = merged;
+          updated++;
+        }
+      } else {
+        newParticipantsList.push({
+          id: nextSeqId('P-', 'ams_seq_participant', newParticipantsList),
+          name,
+          phone,
+          sabha: row.sabha || 'Unassociated',
+          karyakar: row.karyakar || 'None Assigned',
+          guardianDetails: row.guardianDetails || '',
+          createdAt: new Date().toISOString(),
+          isNewRegistration: false,
+          status: 'approved'
         });
         inserted++;
       }
@@ -304,16 +417,19 @@ export const DbProvider = ({ children }) => {
     // Audit Log
     addAuditLog(
       'Excel Master Import',
-      `Imported raw sheet data. Created ${inserted} new records, updated ${updated} records, and skipped ${rejected} invalid rows.`
+      `Imported raw sheet data. Created ${inserted} new, updated ${updated}, ${unchanged} unchanged, ${review} routed to review (no phone), ${duplicates} duplicate rows skipped, ${rejected} rejected.`
     );
 
-    return { inserted, updated, rejected };
+    return { inserted, updated, unchanged, rejected, review, duplicates };
   };
 
-  // Events API
+  // Events API (Coordinator+, per decision D4)
   const addEvent = (eventData) => {
+    if (!hasPermission(ROLES.COORDINATOR)) {
+      return { error: 'Only coordinators or admins can manage events.' };
+    }
     const newEvent = {
-      id: 'E-' + (100 + events.length + 1),
+      id: nextSeqId('E-', 'ams_seq_event', events),
       ...eventData,
       status: eventData.status || 'Draft'
     };
@@ -326,6 +442,9 @@ export const DbProvider = ({ children }) => {
   };
 
   const updateEvent = (eventId, updatedFields) => {
+    if (!hasPermission(ROLES.COORDINATOR)) {
+      return { error: 'Only coordinators or admins can manage events.' };
+    }
     const updatedEvents = events.map(e => {
       if (e.id === eventId) {
         return { ...e, ...updatedFields };
@@ -344,10 +463,13 @@ export const DbProvider = ({ children }) => {
 
   // Attendance Actions
   const markPresent = (eventId, participantId) => {
-    // Check if event is Closed
+    if (!user) {
+      return { success: false, message: 'Sign in required to mark attendance.' };
+    }
+    // Check if event is Closed (explicitly or expired past its end time)
     const event = events.find(e => e.id === eventId);
     if (!event) return { success: false, message: 'Event not found' };
-    if (event.status === 'Closed') {
+    if (getEffectiveStatus(event) === 'Closed') {
       return { success: false, message: 'Cannot register attendance: Event is closed.' };
     }
 
@@ -379,10 +501,14 @@ export const DbProvider = ({ children }) => {
     return { success: true, attendance: newAttendance };
   };
 
+  // Attendance corrections are Coordinator+ (decision D4)
   const undoAttendance = (eventId, participantId) => {
+    if (!hasPermission(ROLES.COORDINATOR)) {
+      return { success: false, message: 'Only coordinators or admins can correct attendance.' };
+    }
     const event = events.find(e => e.id === eventId);
     if (!event) return { success: false, message: 'Event not found' };
-    if (event.status === 'Closed') {
+    if (getEffectiveStatus(event) === 'Closed') {
       return { success: false, message: 'Cannot modify attendance: Event is closed.' };
     }
 
@@ -406,19 +532,29 @@ export const DbProvider = ({ children }) => {
     return { success: true };
   };
 
-  // Register New Participant
+  // Register New Participant. Attendance is NOT marked here — callers must
+  // explicitly call markPresent after user confirmation (PRD FR-4).
   const registerNewParticipant = (formData, eventId = null) => {
-    const newId = 'P-' + (100 + participants.length + 1);
+    const isPublicSubmission = formData.pendingReview === true;
+    // Public shared-form submissions are unauthenticated by design; internal
+    // immediate-approval registrations need Registration Volunteer+ (D4)
+    if (!isPublicSubmission && !hasPermission(ROLES.REGISTRATION_VOLUNTEER)) {
+      return { error: 'Only registration volunteers, coordinators, or admins can register participants directly.' };
+    }
+    const phone = String(formData.phone || '').trim();
+    const newId = nextSeqId('P-', 'ams_seq_participant', participants);
     const newP = {
       id: newId,
       name: formData.name,
-      phone: formData.phone,
+      phone,
       sabha: formData.sabha,
       karyakar: formData.karyakar || 'None Assigned',
       guardianDetails: formData.guardianDetails || '',
       createdAt: new Date().toISOString(),
+      registeredForEventId: eventId || null,
       isNewRegistration: true,
-      pendingReview: formData.pendingReview !== undefined ? formData.pendingReview : false
+      // No phone = no unique identifier: force manual review (decision D3)
+      status: (!phone || isPublicSubmission) ? 'pending' : 'approved'
     };
 
     const updatedParticipants = [...participants, newP];
@@ -430,19 +566,14 @@ export const DbProvider = ({ children }) => {
       `Registered new person: ${newP.name} (ID: ${newId}) assigned to sabha: ${newP.sabha}.`
     );
 
-    // If an active eventId is provided, mark present
-    if (eventId) {
-      const activeEvent = events.find(e => e.id === eventId);
-      if (activeEvent && activeEvent.status === 'Active') {
-        markPresent(eventId, newId);
-      }
-    }
-
     return newP;
   };
 
-  // Administrative Participant Update
+  // Administrative Participant Update (Coordinator+, per decision D4)
   const updateParticipant = (participantId, updatedFields) => {
+    if (!hasPermission(ROLES.COORDINATOR)) {
+      return { error: 'Only coordinators or admins can edit master data.' };
+    }
     const updatedList = participants.map(p => {
       if (p.id === participantId) {
         return { ...p, ...updatedFields };
@@ -459,8 +590,99 @@ export const DbProvider = ({ children }) => {
     );
   };
 
-  // Database Administration
+  // --- Participant lifecycle actions (Coordinator+, per decision D4) ---
+
+  const setParticipantStatus = (participantId, status, extraFields, action, details) => {
+    if (!hasPermission(ROLES.COORDINATOR)) {
+      return { success: false, message: 'Only coordinators or admins can review registrations.' };
+    }
+    const target = participants.find(p => p.id === participantId);
+    if (!target) return { success: false, message: 'Participant not found.' };
+
+    const updatedList = participants.map(p =>
+      p.id === participantId ? { ...p, status, ...extraFields } : p
+    );
+    setParticipants(updatedList);
+    saveToStorage('ams_participants', updatedList);
+    addAuditLog(action, details.replace('{name}', target.name));
+    return { success: true };
+  };
+
+  const approveParticipant = (participantId) =>
+    setParticipantStatus(participantId, 'approved', { isNewRegistration: false },
+      'Registration Approved', `Approved registration for {name} (${participantId}).`);
+
+  const rejectParticipant = (participantId) =>
+    setParticipantStatus(participantId, 'rejected', {},
+      'Registration Rejected', `Rejected registration for {name} (${participantId}).`);
+
+  const linkParticipant = (participantId, existingId) =>
+    setParticipantStatus(participantId, 'linked', { linkedToId: existingId },
+      'Registration Linked', `Linked registration {name} (${participantId}) to existing master record ${existingId}.`);
+
+  // Archive supports the keep-until-removal retention policy (decision D7):
+  // the record and its attendance history are retained but leave all rosters.
+  const archiveParticipant = (participantId) =>
+    setParticipantStatus(participantId, 'archived', {},
+      'Participant Archived', `Archived participant {name} (${participantId}) — removed from active rosters, history retained.`);
+
+  const restoreParticipant = (participantId) =>
+    setParticipantStatus(participantId, 'pending', { linkedToId: null },
+      'Participant Restored', `Restored {name} (${participantId}) to the pending review queue.`);
+
+  // Merge two records: attendance moves to the survivor (skipping events where
+  // the survivor is already marked), empty survivor fields fill from the
+  // duplicate, and the duplicate is kept as a linked record for audit.
+  const mergeParticipants = (survivorId, duplicateId) => {
+    if (!hasPermission(ROLES.COORDINATOR)) {
+      return { success: false, message: 'Only coordinators or admins can merge records.' };
+    }
+    const survivor = participants.find(p => p.id === survivorId);
+    const duplicate = participants.find(p => p.id === duplicateId);
+    if (!survivor || !duplicate || survivorId === duplicateId) {
+      return { success: false, message: 'Invalid merge selection.' };
+    }
+
+    const survivorEventIds = new Set(
+      attendance.filter(a => a.participantId === survivorId).map(a => a.eventId)
+    );
+    let movedMarks = 0;
+    let droppedMarks = 0;
+    const updatedAttendance = attendance
+      .map(a => {
+        if (a.participantId !== duplicateId) return a;
+        if (survivorEventIds.has(a.eventId)) { droppedMarks++; return null; }
+        movedMarks++;
+        return { ...a, participantId: survivorId };
+      })
+      .filter(Boolean);
+
+    const mergedSurvivor = {
+      ...survivor,
+      phone: survivor.phone || duplicate.phone,
+      guardianDetails: survivor.guardianDetails || duplicate.guardianDetails,
+      karyakar: survivor.karyakar === 'None Assigned' ? duplicate.karyakar : survivor.karyakar
+    };
+    const updatedList = participants.map(p => {
+      if (p.id === survivorId) return mergedSurvivor;
+      if (p.id === duplicateId) return { ...p, status: 'linked', linkedToId: survivorId };
+      return p;
+    });
+
+    setAttendance(updatedAttendance);
+    saveToStorage('ams_attendance', updatedAttendance);
+    setParticipants(updatedList);
+    saveToStorage('ams_participants', updatedList);
+    addAuditLog(
+      'Participants Merged',
+      `Merged ${duplicate.name} (${duplicateId}) into ${survivor.name} (${survivorId}). Moved ${movedMarks} attendance mark(s), dropped ${droppedMarks} duplicate mark(s).`
+    );
+    return { success: true };
+  };
+
+  // Database Administration (Admin only)
   const clearDatabase = () => {
+    if (!hasPermission(ROLES.ADMIN)) return;
     setParticipants([]);
     setEvents([]);
     setAttendance([]);
@@ -485,6 +707,7 @@ export const DbProvider = ({ children }) => {
   };
 
   const resetToFactoryDefault = () => {
+    if (!hasPermission(ROLES.ADMIN)) return;
     setParticipants(INITIAL_PARTICIPANTS);
     setEvents(INITIAL_EVENTS);
     setAttendance(INITIAL_ATTENDANCE);
@@ -525,8 +748,16 @@ export const DbProvider = ({ children }) => {
       undoAttendance,
       registerNewParticipant,
       updateParticipant,
+      approveParticipant,
+      rejectParticipant,
+      linkParticipant,
+      archiveParticipant,
+      restoreParticipant,
+      mergeParticipants,
       clearDatabase,
       resetToFactoryDefault,
+      getEffectiveStatus,
+      isEventExpired,
       setSabhas,
       setKaryakars,
       addAuditLog
