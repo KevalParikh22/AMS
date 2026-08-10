@@ -29,7 +29,7 @@ export default function Login() {
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor: 'var(--bg-primary)',
-      backgroundImage: 'radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.1) 0%, transparent 40%)',
+      backgroundImage: 'radial-gradient(circle at 10% 20%, rgba(var(--accent-rgb), 0.1) 0%, transparent 40%)',
       padding: '1.5rem'
     }}>
       <div className="glass-panel animate-fade-in" style={{
@@ -41,7 +41,7 @@ export default function Login() {
         {/* Brand Header */}
         <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
           <div style={{
-            background: 'linear-gradient(135deg, var(--accent), #4f46e5)',
+            background: 'linear-gradient(135deg, var(--accent), var(--accent-secondary))',
             width: '64px',
             height: '64px',
             borderRadius: 'var(--radius-lg)',

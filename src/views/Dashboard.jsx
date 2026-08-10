@@ -12,14 +12,15 @@ import {
 } from 'lucide-react';
 
 export default function Dashboard({ setView, setSelectedEventId }) {
-  const { participants, events, attendance, sabhas, auditLogs } = useDb();
+  const { participants, events, attendance, sabhas, auditLogs, getEffectiveStatus } = useDb();
   const { user } = useAuth();
 
-  // Active Events
-  const activeEvents = events.filter(e => e.status === 'Active');
+  // Active Events (expired events are effectively closed)
+  const activeEvents = events.filter(e => getEffectiveStatus(e) === 'Active');
   
-  // Basic aggregates
-  const totalBalaks = participants.length;
+  // Basic aggregates (approved registry members only)
+  const approvedParticipants = participants.filter(p => p.status === 'approved');
+  const totalBalaks = approvedParticipants.length;
   const activeEventsCount = activeEvents.length;
   const totalSabhasCount = sabhas.length;
   
@@ -40,9 +41,9 @@ export default function Dashboard({ setView, setSelectedEventId }) {
     let expectedCount = 0;
     
     if (scope === 'All Sabhas' || !scope) {
-      expectedCount = participants.length;
+      expectedCount = approvedParticipants.length;
     } else {
-      expectedCount = participants.filter(p => p.sabha === scope).length;
+      expectedCount = approvedParticipants.filter(p => p.sabha === scope).length;
     }
 
     const presentCount = attendance.filter(a => a.eventId === event.id).length;

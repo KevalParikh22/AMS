@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 
 export default function SharedRegistration({ eventId }) {
-  const { events, sabhas, registerNewParticipant } = useDb();
+  const { events, sabhas, registerNewParticipant, getEffectiveStatus } = useDb();
 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -22,9 +22,9 @@ export default function SharedRegistration({ eventId }) {
   const [copiedReceipt, setCopiedReceipt] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Find the event
+  // Find the event; links auto-expire once the event end date/time passes (PRD FR-6)
   const event = events.find(e => e.id === eventId);
-  const isClosed = event ? event.status === 'Closed' : false;
+  const isClosed = event ? getEffectiveStatus(event) === 'Closed' : false;
 
   // Set default sabha scope from event if possible
   React.useEffect(() => {
@@ -57,7 +57,7 @@ export default function SharedRegistration({ eventId }) {
         karyakar: 'None Assigned', // Assigned during coordinator review
         guardianDetails,
         pendingReview: true // Set to pending queue
-      }, eventId); // Automatically marks present if event date rules match and is confirmed
+      }, eventId); // Records the target event only — attendance is never marked from the public form
 
       setReceipt({
         id: pendingP.id,
@@ -110,7 +110,7 @@ export default function SharedRegistration({ eventId }) {
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor: 'var(--bg-primary)',
-      backgroundImage: 'radial-gradient(circle at 90% 10%, rgba(99, 102, 241, 0.08) 0%, transparent 40%)',
+      backgroundImage: 'radial-gradient(circle at 90% 10%, rgba(var(--accent-rgb), 0.08) 0%, transparent 40%)',
       padding: '2rem 1rem'
     }}>
       <div className="glass-panel" style={{

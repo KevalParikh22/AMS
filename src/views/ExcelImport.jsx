@@ -26,6 +26,7 @@ export default function ExcelImport() {
   const [rawRows, setRawRows] = useState([]); // Array of arrays from row 1 onwards
   const [mappings, setMappings] = useState({});
   const [previewRows, setPreviewRows] = useState([]);
+  const [previewStats, setPreviewStats] = useState(null);
   const [importSummary, setImportSummary] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
   
@@ -90,9 +91,12 @@ export default function ExcelImport() {
     reader.readAsArrayBuffer(uploadedFile);
   };
 
-  // Generate preview of mapped columns
+  // Analyze ALL rows so duplicates/ambiguities are identified before import (FR-1)
   const generatePreview = (rows, currentMappings, currentHeaders) => {
-    const previewList = rows.slice(0, 10).map((row, rowIdx) => {
+    const seenPhones = new Set();
+    const stats = { new: 0, update: 0, unchanged: 0, review: 0, duplicate: 0, rejected: 0 };
+
+    const analyzed = rows.map((row, rowIdx) => {
       const parsedRow = {};
       Object.entries(currentMappings).forEach(([fieldKey, colIdx]) => {
         if (colIdx !== undefined && colIdx > -1) {
@@ -102,30 +106,42 @@ export default function ExcelImport() {
         }
       });
 
-      // Validations
-      const errors = [];
-      const warnings = [];
-      
-      if (!parsedRow.name) errors.push('Missing Name');
-      if (!parsedRow.phone) errors.push('Missing Phone');
-      
-      // Duplicate check in existing master db
-      if (parsedRow.phone) {
-        const phoneMatch = participants.some(p => p.phone === parsedRow.phone);
-        if (phoneMatch) {
-          warnings.push(`Update: Will merge details into existing participant (Phone: ${parsedRow.phone})`);
+      // Determine what the importer will do with this row
+      let status = 'new';
+      let note = 'New participant';
+      if (!parsedRow.name) {
+        status = 'rejected';
+        note = 'Missing name — row will be rejected';
+      } else if (!parsedRow.phone) {
+        status = 'review';
+        note = 'No phone (no unique ID) — will be created flagged for manual review';
+      } else if (seenPhones.has(parsedRow.phone)) {
+        status = 'duplicate';
+        note = `Duplicate phone within this file (${parsedRow.phone}) — row will be skipped`;
+      } else {
+        seenPhones.add(parsedRow.phone);
+        const existing = participants.find(p => p.phone === parsedRow.phone && (p.status === 'approved' || p.status === 'pending'));
+        if (existing) {
+          const isSame = (parsedRow.name || existing.name) === existing.name &&
+            (parsedRow.sabha || existing.sabha) === existing.sabha &&
+            (parsedRow.karyakar || existing.karyakar) === existing.karyakar &&
+            (parsedRow.guardianDetails || existing.guardianDetails) === existing.guardianDetails;
+          if (isSame) {
+            status = 'unchanged';
+            note = `Identical to existing record ${existing.id} — no change`;
+          } else {
+            status = 'update';
+            note = `Will merge details into existing participant ${existing.id}`;
+          }
         }
       }
+      stats[status]++;
 
-      return {
-        id: rowIdx,
-        data: parsedRow,
-        errors,
-        warnings
-      };
+      return { id: rowIdx, data: parsedRow, status, note };
     });
 
-    setPreviewRows(previewList);
+    setPreviewStats(stats);
+    setPreviewRows(analyzed.slice(0, 10));
   };
 
   // Handle mapping updates
@@ -168,6 +184,10 @@ export default function ExcelImport() {
     }
 
     const summary = importExcelData(dataToImport);
+    if (summary.error) {
+      setErrorMsg(summary.error);
+      return;
+    }
     setImportSummary(summary);
     
     // Reset state
@@ -176,6 +196,7 @@ export default function ExcelImport() {
     setRawRows([]);
     setMappings({});
     setPreviewRows([]);
+    setPreviewStats(null);
   };
 
   const handleReset = () => {
@@ -184,6 +205,7 @@ export default function ExcelImport() {
     setRawRows([]);
     setMappings({});
     setPreviewRows([]);
+    setPreviewStats(null);
     setImportSummary(null);
     setErrorMsg('');
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -194,7 +216,7 @@ export default function ExcelImport() {
       
       {/* Informational Guidelines Header */}
       <div className="card" style={{
-        background: 'linear-gradient(to right, var(--bg-secondary), rgba(99, 102, 241, 0.02))'
+        background: 'linear-gradient(to right, var(--bg-secondary), rgba(var(--accent-rgb), 0.02))'
       }}>
         <h3 style={{ fontSize: '1.25rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <FileSpreadsheet color="var(--accent)" size={22} />
@@ -220,10 +242,13 @@ export default function ExcelImport() {
             <CheckCircle2 size={20} />
             <span> Roster Sync Successful</span>
           </h4>
-          <ul style={{ listStyle: 'none', paddingLeft: 0, fontSize: '0.9rem', color: 'var(--text-primary)', display: 'flex', gap: '2rem', flexWrap: 'wrap' }}>
-            <li>➕ New Added: <strong>{importSummary.inserted} records</strong></li>
-            <li>🔄 Existing Merged: <strong>{importSummary.updated} records</strong></li>
-            <li>⚠️ Invalid Skipped: <strong>{importSummary.rejected} rows</strong></li>
+          <ul style={{ listStyle: 'none', paddingLeft: 0, fontSize: '0.9rem', color: 'var(--text-primary)', display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+            <li>➕ New Added: <strong>{importSummary.inserted}</strong></li>
+            <li>🔄 Existing Merged: <strong>{importSummary.updated}</strong></li>
+            <li>➖ Unchanged: <strong>{importSummary.unchanged}</strong></li>
+            <li>👁️ Sent to Review (no phone): <strong>{importSummary.review}</strong></li>
+            <li>📑 Duplicate Rows Skipped: <strong>{importSummary.duplicates}</strong></li>
+            <li>⚠️ Rejected: <strong>{importSummary.rejected}</strong></li>
           </ul>
         </div>
       )}
@@ -315,10 +340,22 @@ export default function ExcelImport() {
             ))}
           </div>
 
+          {/* Whole-file analysis summary (duplicates/ambiguities identified before import) */}
+          {previewStats && (
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <span className="badge badge-success">New: {previewStats.new}</span>
+              <span className="badge badge-info">Updates: {previewStats.update}</span>
+              <span className="badge badge-info" style={{ opacity: 0.7 }}>Unchanged: {previewStats.unchanged}</span>
+              <span className="badge badge-warning">To Review (no phone): {previewStats.review}</span>
+              <span className="badge badge-warning">Duplicates in file: {previewStats.duplicate}</span>
+              <span className="badge badge-danger">Rejected: {previewStats.rejected}</span>
+            </div>
+          )}
+
           {/* Verification Preview Table */}
           <div>
             <h4 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span> Roster Import Preview (First 10 rows)</span>
+              <span> Roster Import Preview (First 10 rows — all {rawRows.length} rows analyzed above)</span>
             </h4>
             <div className="table-container">
               <table className="custom-table">
@@ -345,18 +382,22 @@ export default function ExcelImport() {
                         {pRow.data.guardianDetails || <span style={{ color: 'var(--text-muted)' }}>-</span>}
                       </td>
                       <td>
-                        {pRow.errors.length > 0 ? (
-                          <div style={{ color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem' }}>
+                        {pRow.status === 'rejected' ? (
+                          <div style={{ color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem' }} title={pRow.note}>
                             <AlertTriangle size={12} />
-                            <span>{pRow.errors.join(', ')}</span>
+                            <span>Rejected</span>
                           </div>
-                        ) : pRow.warnings.length > 0 ? (
-                          <div style={{ color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem' }}>
+                        ) : pRow.status === 'duplicate' || pRow.status === 'review' ? (
+                          <div style={{ color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem' }} title={pRow.note}>
                             <AlertTriangle size={12} />
-                            <span>Merge</span>
+                            <span>{pRow.status === 'duplicate' ? 'Duplicate in file' : 'To Review'}</span>
                           </div>
+                        ) : pRow.status === 'update' ? (
+                          <span className="badge badge-info" title={pRow.note}>Merge</span>
+                        ) : pRow.status === 'unchanged' ? (
+                          <span className="badge badge-info" style={{ opacity: 0.7 }} title={pRow.note}>Unchanged</span>
                         ) : (
-                          <span className="badge badge-success">New Roster</span>
+                          <span className="badge badge-success" title={pRow.note}>New Roster</span>
                         )}
                       </td>
                     </tr>
@@ -383,7 +424,7 @@ export default function ExcelImport() {
       <style>{`
         .upload-dropzone:hover {
           border-color: var(--accent) !important;
-          background-color: rgba(99, 102, 241, 0.05) !important;
+          background-color: rgba(var(--accent-rgb), 0.05) !important;
         }
       `}</style>
     </div>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useDb } from '../context/DbContext';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, ROLES } from '../context/AuthContext';
 import { 
   Search, 
   Check, 
@@ -12,21 +12,23 @@ import {
 } from 'lucide-react';
 
 export default function AttendanceDesk({ setView, selectedEventId, setSelectedEventId }) {
-  const { 
-    events, 
-    queryParticipants, 
-    attendance, 
-    markPresent, 
-    undoAttendance 
+  const {
+    events,
+    queryParticipants,
+    attendance,
+    markPresent,
+    undoAttendance,
+    getEffectiveStatus
   } = useDb();
-  
-  const { user } = useAuth();
-  
+
+  const { user, hasPermission } = useAuth();
+  const canCorrectAttendance = hasPermission(ROLES.COORDINATOR);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
-  
-  // Find active events
-  const activeEvents = events.filter(e => e.status === 'Active');
+
+  // Find active events (expired events are effectively closed)
+  const activeEvents = events.filter(e => getEffectiveStatus(e) === 'Active');
 
   // Sync selected event id if not set and active events exist
   useEffect(() => {
@@ -232,6 +234,11 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
                       <div>
                         <h4 style={{ fontSize: '1.1rem', fontWeight: 600 }}>{item.name}</h4>
                         <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>ID: {item.id}</span>
+                        {item.status === 'pending' && (
+                          <span className="badge badge-warning" style={{ marginLeft: '0.5rem', fontSize: '0.7rem' }}>
+                            Pending Review
+                          </span>
+                        )}
                       </div>
                       {isPresent && (
                         <span className="badge badge-success" style={{ padding: '0.35rem 0.6rem' }}>
@@ -251,21 +258,27 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
                   {/* Attendance marking toggle */}
                   <div>
                     {isPresent ? (
-                      <button
-                        onClick={() => handleUndoPresent(item.id)}
-                        className="btn btn-ghost"
-                        style={{
-                          width: '100%',
-                          marginTop: '1rem',
-                          color: 'var(--danger)',
-                          fontSize: '0.85rem',
-                          border: '1px dashed var(--danger-light)',
-                          padding: '0.5rem'
-                        }}
-                      >
-                        <RotateCcw size={14} />
-                        <span>Undo Check-in</span>
-                      </button>
+                      canCorrectAttendance ? (
+                        <button
+                          onClick={() => handleUndoPresent(item.id)}
+                          className="btn btn-ghost"
+                          style={{
+                            width: '100%',
+                            marginTop: '1rem',
+                            color: 'var(--danger)',
+                            fontSize: '0.85rem',
+                            border: '1px dashed var(--danger-light)',
+                            padding: '0.5rem'
+                          }}
+                        >
+                          <RotateCcw size={14} />
+                          <span>Undo Check-in</span>
+                        </button>
+                      ) : (
+                        <p style={{ marginTop: '1rem', fontSize: '0.75rem', color: 'var(--text-muted)', textAlign: 'center' }}>
+                          Ask a coordinator to correct a wrong check-in.
+                        </p>
+                      )
                     ) : (
                       /* Swipe to check-in component */
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>

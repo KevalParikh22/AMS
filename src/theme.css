@@ -1,0 +1,28 @@
+/*
+  ============================================================
+  APP THEME — edit the values below to re-color the whole app.
+  ============================================================
+
+  --theme-primary       Main brand color: buttons, links, active nav,
+                        focus rings, highlights.
+  --theme-primary-hover Darker shade of primary used on hover states.
+  --theme-primary-rgb   The SAME primary color as "R, G, B" numbers —
+                        used for translucent glows and tints.
+                        (If you change --theme-primary, update this too.)
+  --theme-secondary     Supporting brand color: second stop of the logo /
+                        brand gradients and decorative highlights.
+  --theme-secondary-rgb The secondary color as "R, G, B" numbers.
+
+  Everything else in the app (backgrounds, text, success/warning/danger)
+  derives from src/index.css and does not need to change with the brand.
+*/
+
+/* Active palette: "Kesari & Maroon" — saffron primary, deep maroon secondary */
+:root {
+  --theme-primary: #e87817;
+  --theme-primary-hover: #c4610e;
+  --theme-primary-rgb: 232, 120, 23;
+
+  --theme-secondary: #8c1d18;
+  --theme-secondary-rgb: 140, 29, 24;
+}

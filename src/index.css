@@ -1,4 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap');
+@import './theme.css';
 
 :root {
   /* Premium Dark Theme Color Palette */
@@ -7,15 +8,17 @@
   --bg-tertiary: #1f2a45;
   --bg-glass: rgba(22, 30, 49, 0.7);
   --border-color: #2a3a5f;
-  --border-focus: #4f46e5;
-  
+  --border-focus: var(--theme-primary-hover);
+
   --text-primary: #f3f4f6;
   --text-secondary: #9ca3af;
   --text-muted: #6b7280;
-  
-  --accent: #6366f1;
-  --accent-hover: #4f46e5;
-  --accent-light: rgba(99, 102, 241, 0.15);
+
+  --accent: var(--theme-primary);
+  --accent-hover: var(--theme-primary-hover);
+  --accent-rgb: var(--theme-primary-rgb);
+  --accent-light: rgba(var(--theme-primary-rgb), 0.15);
+  --accent-secondary: var(--theme-secondary);
   
   --success: #10b981;
   --success-light: rgba(16, 185, 129, 0.15);
@@ -49,15 +52,15 @@
     --bg-tertiary: #f1f5f9;
     --bg-glass: rgba(255, 255, 255, 0.8);
     --border-color: #e2e8f0;
-    --border-focus: #6366f1;
-    
+    --border-focus: var(--theme-primary);
+
     --text-primary: #0f172a;
     --text-secondary: #475569;
     --text-muted: #94a3b8;
-    
-    --accent: #4f46e5;
-    --accent-hover: #3730a3;
-    --accent-light: rgba(79, 70, 229, 0.1);
+
+    --accent: var(--theme-primary);
+    --accent-hover: var(--theme-primary-hover);
+    --accent-light: rgba(var(--theme-primary-rgb), 0.1);
     
     --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.05);
     --shadow-lg: 0 12px 24px -4px rgba(0, 0, 0, 0.08);
@@ -167,7 +170,7 @@ a:hover {
 .card:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-lg);
-  border-color: rgba(99, 102, 241, 0.4);
+  border-color: rgba(var(--accent-rgb), 0.4);
 }
 
 /* Form Styles */
@@ -198,7 +201,7 @@ a:hover {
 .form-control:focus {
   outline: none;
   border-color: var(--border-focus);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.2);
 }
 
 .form-control::placeholder {

@@ -21,6 +21,12 @@ function AppContent() {
   const [urlParams, setUrlParams] = useState({ view: null, eventId: null });
 
   useEffect(() => {
+    // Reset navigation when the signed-in user changes so a lower-privileged
+    // login doesn't inherit the previous user's active view
+    setView(v => (v === 'shared-registration' ? v : 'dashboard'));
+  }, [user?.id]);
+
+  useEffect(() => {
     // Parse query params for shared registration routes
     const params = new URLSearchParams(window.location.search);
     const viewParam = params.get('view');
