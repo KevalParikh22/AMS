@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth, ROLES } from './AuthContext';
+import { isCloudMode } from '../lib/supabase';
+import { fetchAllTables, fetchTable, pushTable, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
 
 const DbContext = createContext();
 
@@ -160,9 +162,36 @@ const nextSeqId = (prefix, counterKey, list) => {
   return prefix + next;
 };
 
+// Migrate legacy participant records (pendingReview flags, "[REJECTED]" name
+// prefixes, "LINKED-" id rewrites) into explicit lifecycle statuses.
+const migrateParticipantsList = (list) => list.map(p => {
+  if (p.status) return p;
+  let status = 'approved';
+  let name = p.name;
+  if (p.pendingReview) status = 'pending';
+  else if (String(p.name).startsWith('[REJECTED] ')) {
+    status = 'rejected';
+    name = String(p.name).replace('[REJECTED] ', '');
+  }
+  else if (String(p.id).startsWith('LINKED-')) status = 'linked';
+  const { pendingReview, ...rest } = p;
+  return { ...rest, name, status };
+});
+
+// Migrate legacy plain-string karyakar entries to { name, sabha } objects
+const migrateKaryakarsList = (list) => {
+  if (list.length > 0 && typeof list[0] === 'string') {
+    return list.map(name => {
+      const known = INITIAL_KARYAKARS.find(k => k.name === name);
+      return { name, sabha: known ? known.sabha : 'Unassigned' };
+    });
+  }
+  return list;
+};
+
 export const DbProvider = ({ children }) => {
   const { user, hasPermission } = useAuth();
-  
+
   // Local Database States
   const [participants, setParticipants] = useState([]);
   const [events, setEvents] = useState([]);
@@ -170,106 +199,189 @@ export const DbProvider = ({ children }) => {
   const [sabhas, setSabhas] = useState([]);
   const [karyakars, setKaryakars] = useState([]);
   const [auditLogs, setAuditLogs] = useState([]);
-  
-  // Initialize DB from localStorage or default static templates
+  // 'local' (sandbox) | 'syncing' | 'online' | 'offline' (cloud unreachable,
+  // serving cached data) | 'error' (a cloud write failed)
+  const [cloudStatus, setCloudStatus] = useState(isCloudMode ? 'syncing' : 'local');
+
+  // Initialize from the cloud (when configured) or localStorage sandbox
   useEffect(() => {
-    const db_participants = localStorage.getItem('ams_participants');
-    const db_events = localStorage.getItem('ams_events');
-    const db_attendance = localStorage.getItem('ams_attendance');
-    const db_sabhas = localStorage.getItem('ams_sabhas');
-    const db_karyakars = localStorage.getItem('ams_karyakars');
-    const db_logs = localStorage.getItem('ams_audit_logs');
-
-    // Participant lifecycle: status is 'approved' | 'pending' | 'rejected' | 'linked' | 'archived'.
-    // Migrate legacy records that used pendingReview flags, "[REJECTED]" name
-    // prefixes, or "LINKED-" id rewrites into explicit statuses.
-    let loadedParticipants = db_participants ? JSON.parse(db_participants) : INITIAL_PARTICIPANTS;
-    loadedParticipants = loadedParticipants.map(p => {
-      if (p.status) return p;
-      let status = 'approved';
-      let name = p.name;
-      if (p.pendingReview) status = 'pending';
-      else if (String(p.name).startsWith('[REJECTED] ')) {
-        status = 'rejected';
-        name = String(p.name).replace('[REJECTED] ', '');
-      }
-      else if (String(p.id).startsWith('LINKED-')) status = 'linked';
-      const { pendingReview, ...rest } = p;
-      return { ...rest, name, status };
-    });
-    setParticipants(loadedParticipants);
-    localStorage.setItem('ams_participants', JSON.stringify(loadedParticipants));
-
-    let loadedEvents = db_events ? JSON.parse(db_events) : INITIAL_EVENTS;
-    // Auto-close sweep: persist Closed status for events past their end date/time
-    const expired = loadedEvents.filter(e => e.status !== 'Closed' && isEventExpired(e));
-    if (expired.length > 0) {
-      loadedEvents = loadedEvents.map(e =>
-        expired.some(x => x.id === e.id) ? { ...e, status: 'Closed' } : e
-      );
-      const closeLog = {
-        id: 'L-' + Date.now(),
-        action: 'Event Auto-Close',
-        timestamp: new Date().toISOString(),
-        userId: 'system',
-        userRole: 'System',
-        details: `Automatically closed ${expired.length} event(s) past their end time: ${expired.map(e => `${e.name} (${e.id})`).join(', ')}.`
+    // Sandbox loader — also the offline fallback in cloud mode
+    const loadFromLocal = (seedIfEmpty) => {
+      const read = (key, initial) => {
+        const stored = localStorage.getItem(key);
+        if (stored) return JSON.parse(stored);
+        return seedIfEmpty ? initial : [];
       };
-      const existingLogs = db_logs ? JSON.parse(db_logs) : [];
-      localStorage.setItem('ams_audit_logs', JSON.stringify([closeLog, ...existingLogs]));
-    }
-    setEvents(loadedEvents);
-    localStorage.setItem('ams_events', JSON.stringify(loadedEvents));
 
-    if (db_attendance) setAttendance(JSON.parse(db_attendance));
-    else {
-      setAttendance(INITIAL_ATTENDANCE);
-      localStorage.setItem('ams_attendance', JSON.stringify(INITIAL_ATTENDANCE));
-    }
+      const loadedParticipants = migrateParticipantsList(read('ams_participants', INITIAL_PARTICIPANTS));
+      setParticipants(loadedParticipants);
+      localStorage.setItem('ams_participants', JSON.stringify(loadedParticipants));
 
-    if (db_sabhas) setSabhas(JSON.parse(db_sabhas));
-    else {
-      setSabhas(INITIAL_SABHAS);
-      localStorage.setItem('ams_sabhas', JSON.stringify(INITIAL_SABHAS));
-    }
-
-    if (db_karyakars) {
-      let loadedKaryakars = JSON.parse(db_karyakars);
-      // Migrate legacy plain-string entries to { name, sabha } objects
-      if (loadedKaryakars.length > 0 && typeof loadedKaryakars[0] === 'string') {
-        loadedKaryakars = loadedKaryakars.map(name => {
-          const known = INITIAL_KARYAKARS.find(k => k.name === name);
-          return { name, sabha: known ? known.sabha : 'Unassigned' };
-        });
-        localStorage.setItem('ams_karyakars', JSON.stringify(loadedKaryakars));
+      let loadedEvents = read('ams_events', INITIAL_EVENTS);
+      // Auto-close sweep: persist Closed status for events past their end date/time
+      const expired = loadedEvents.filter(e => e.status !== 'Closed' && isEventExpired(e));
+      let loadedLogs = read('ams_audit_logs', []);
+      if (expired.length > 0) {
+        loadedEvents = loadedEvents.map(e =>
+          expired.some(x => x.id === e.id) ? { ...e, status: 'Closed' } : e
+        );
+        loadedLogs = [{
+          id: 'L-' + Date.now(),
+          action: 'Event Auto-Close',
+          timestamp: new Date().toISOString(),
+          userId: 'system',
+          userRole: 'System',
+          details: `Automatically closed ${expired.length} event(s) past their end time: ${expired.map(e => `${e.name} (${e.id})`).join(', ')}.`
+        }, ...loadedLogs];
       }
-      setKaryakars(loadedKaryakars);
-    }
-    else {
-      setKaryakars(INITIAL_KARYAKARS);
-      localStorage.setItem('ams_karyakars', JSON.stringify(INITIAL_KARYAKARS));
+      setEvents(loadedEvents);
+      localStorage.setItem('ams_events', JSON.stringify(loadedEvents));
+
+      setAttendance(read('ams_attendance', INITIAL_ATTENDANCE));
+      setSabhas(read('ams_sabhas', INITIAL_SABHAS));
+      setKaryakars(migrateKaryakarsList(read('ams_karyakars', INITIAL_KARYAKARS)));
+
+      if (loadedLogs.length === 0 && seedIfEmpty) {
+        loadedLogs = [{
+          id: 'L-1',
+          action: 'Database Initialization',
+          timestamp: new Date().toISOString(),
+          userId: 'system',
+          userRole: 'System',
+          details: 'Initial mock database loaded successfully.'
+        }];
+      }
+      setAuditLogs(loadedLogs);
+      localStorage.setItem('ams_audit_logs', JSON.stringify(loadedLogs));
+    };
+
+    if (!isCloudMode) {
+      loadFromLocal(true);
+      return;
     }
 
-    // Re-read logs since the auto-close sweep above may have prepended an entry
-    const freshLogs = localStorage.getItem('ams_audit_logs');
-    if (freshLogs) setAuditLogs(JSON.parse(freshLogs));
-    else {
-      const initLog = [{
-        id: 'L-1',
-        action: 'Database Initialization',
-        timestamp: new Date().toISOString(),
-        userId: 'system',
-        userRole: 'System',
-        details: 'Initial mock database loaded successfully.'
-      }];
-      setAuditLogs(initLog);
-      localStorage.setItem('ams_audit_logs', JSON.stringify(initLog));
+    // Cloud mode: preserve any pre-cloud sandbox data once, so it can be
+    // uploaded later from Admin Control (the cloud load overwrites the cache).
+    if (!localStorage.getItem('ams_sandbox_backup')) {
+      const snapshot = {};
+      CLOUD_KEYS.forEach(k => {
+        const v = localStorage.getItem(k);
+        if (v) snapshot[k] = JSON.parse(v);
+      });
+      if (Object.keys(snapshot).length > 0) {
+        localStorage.setItem('ams_sandbox_backup', JSON.stringify(snapshot));
+      }
     }
+
+    fetchAllTables()
+      .then(data => {
+        setParticipants(migrateParticipantsList(data.ams_participants));
+
+        // Auto-close sweep against cloud events
+        let loadedEvents = data.ams_events;
+        const expired = loadedEvents.filter(e => e.status !== 'Closed' && isEventExpired(e));
+        let logs = data.ams_audit_logs;
+        if (expired.length > 0) {
+          loadedEvents = loadedEvents.map(e =>
+            expired.some(x => x.id === e.id) ? { ...e, status: 'Closed' } : e
+          );
+          const closeLog = {
+            id: 'L-' + Date.now(),
+            action: 'Event Auto-Close',
+            timestamp: new Date().toISOString(),
+            userId: 'system',
+            userRole: 'System',
+            details: `Automatically closed ${expired.length} event(s) past their end time: ${expired.map(e => `${e.name} (${e.id})`).join(', ')}.`
+          };
+          logs = [closeLog, ...logs];
+          pushTable('ams_events', loadedEvents).catch(() => {});
+          pushTable('ams_audit_logs', [closeLog]).catch(() => {});
+        }
+        setEvents(loadedEvents);
+        setAttendance(data.ams_attendance);
+        setSabhas(data.ams_sabhas);
+        setKaryakars(data.ams_karyakars);
+        setAuditLogs(logs);
+
+        // Refresh the local cache with cloud truth
+        localStorage.setItem('ams_participants', JSON.stringify(data.ams_participants));
+        localStorage.setItem('ams_events', JSON.stringify(loadedEvents));
+        localStorage.setItem('ams_attendance', JSON.stringify(data.ams_attendance));
+        localStorage.setItem('ams_sabhas', JSON.stringify(data.ams_sabhas));
+        localStorage.setItem('ams_karyakars', JSON.stringify(data.ams_karyakars));
+        localStorage.setItem('ams_audit_logs', JSON.stringify(logs));
+        setCloudStatus('online');
+      })
+      .catch(err => {
+        console.error('Cloud load failed, serving cached data:', err);
+        loadFromLocal(false);
+        setCloudStatus('offline');
+      });
   }, []);
 
-  // Helper helper to write to storage
+  // Realtime: refresh a table when another device changes it
+  useEffect(() => {
+    if (!isCloudMode) return;
+    const setters = {
+      ams_participants: (rows) => setParticipants(migrateParticipantsList(rows)),
+      ams_events: setEvents,
+      ams_attendance: setAttendance,
+      ams_sabhas: setSabhas,
+      ams_karyakars: setKaryakars,
+      ams_audit_logs: setAuditLogs
+    };
+    const unsubscribe = subscribeToChanges(async (storageKey) => {
+      try {
+        const rows = await fetchTable(storageKey);
+        setters[storageKey](rows);
+        localStorage.setItem(storageKey, JSON.stringify(rows));
+      } catch (err) {
+        console.error('Realtime refresh failed:', err);
+      }
+    });
+    return unsubscribe;
+  }, []);
+
+  // Persist locally (cache) and write through to the cloud when configured
   const saveToStorage = (key, data) => {
     localStorage.setItem(key, JSON.stringify(data));
+    if (isCloudMode) {
+      pushTable(key, data)
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Cloud sync failed:', err);
+          setCloudStatus('error');
+        });
+    }
+  };
+
+  // One-time migration: push the pre-cloud sandbox snapshot into Supabase
+  const uploadLocalSandbox = async () => {
+    if (!isCloudMode) return { success: false, message: 'Cloud mode is not configured.' };
+    if (!hasPermission(ROLES.ADMIN)) return { success: false, message: 'Only administrators can migrate data.' };
+    const backup = localStorage.getItem('ams_sandbox_backup');
+    if (!backup) return { success: false, message: 'No local sandbox snapshot found.' };
+    try {
+      const snapshot = JSON.parse(backup);
+      if (snapshot.ams_participants) await pushTable('ams_participants', migrateParticipantsList(snapshot.ams_participants));
+      if (snapshot.ams_events) await pushTable('ams_events', snapshot.ams_events);
+      if (snapshot.ams_attendance) await pushTable('ams_attendance', snapshot.ams_attendance);
+      if (snapshot.ams_sabhas) await pushTable('ams_sabhas', snapshot.ams_sabhas);
+      if (snapshot.ams_karyakars) await pushTable('ams_karyakars', migrateKaryakarsList(snapshot.ams_karyakars));
+      if (snapshot.ams_audit_logs) await pushTable('ams_audit_logs', snapshot.ams_audit_logs);
+      const fresh = await fetchAllTables();
+      setParticipants(migrateParticipantsList(fresh.ams_participants));
+      setEvents(fresh.ams_events);
+      setAttendance(fresh.ams_attendance);
+      setSabhas(fresh.ams_sabhas);
+      setKaryakars(fresh.ams_karyakars);
+      setAuditLogs(fresh.ams_audit_logs);
+      localStorage.removeItem('ams_sandbox_backup');
+      addAuditLog('Cloud Migration', 'Uploaded local sandbox data into the cloud database.');
+      return { success: true };
+    } catch (err) {
+      return { success: false, message: 'Migration failed: ' + err.message };
+    }
   };
 
   // Add Log Entry
@@ -693,6 +805,14 @@ export const DbProvider = ({ children }) => {
     localStorage.removeItem('ams_events');
     localStorage.removeItem('ams_attendance');
     localStorage.removeItem('ams_audit_logs');
+
+    // In cloud mode, clear the shared tables too (audit trail is append-only
+    // server-side, so cloud logs are retained by design)
+    if (isCloudMode) {
+      pushTable('ams_attendance', []).catch(() => {});
+      pushTable('ams_events', []).catch(() => {});
+      pushTable('ams_participants', []).catch(() => {});
+    }
     
     const resetLog = [{
       id: 'L-' + Date.now(),
@@ -759,6 +879,8 @@ export const DbProvider = ({ children }) => {
       resetToFactoryDefault,
       getEffectiveStatus,
       isEventExpired,
+      cloudStatus,
+      uploadLocalSandbox,
       setSabhas,
       setKaryakars,
       addAuditLog

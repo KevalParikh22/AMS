@@ -2,7 +2,7 @@
 
 A mobile-friendly web application for managing event attendance and participant registration for sabha mandals. Volunteers can mark existing participants present in seconds using a swipe/tap action, import the master roster from Excel, register new people when no matching record exists, and export attendance/registration reports.
 
-**Phase 1 MVP** — fully client-side prototype. All data is persisted in the browser's `localStorage` (no backend yet).
+Runs in two modes: a zero-setup **local sandbox** (all data in the browser's `localStorage`, mock logins) and an optional **cloud mode** backed by Supabase — real email/password logins with password reset, multi-device realtime sync, and server-side role enforcement. See [SETUP-BACKEND.md](SETUP-BACKEND.md) to enable cloud mode and deploy to Vercel.
 
 ## Domain terminology
 
@@ -40,9 +40,9 @@ npm run preview  # Serve the production build
 npm run lint     # Oxlint
 ```
 
-### Demo logins
+### Demo logins (sandbox mode)
 
-Authentication is mocked — no passwords. Use one of the preset usernames, or type any name to create a custom user with a chosen role:
+In sandbox mode authentication is mocked — no passwords. Use one of the preset usernames, or type any name to create a custom user with a chosen role. (In cloud mode the login screen switches to real email/password accounts.)
 
 | Username | Role |
 |---|---|

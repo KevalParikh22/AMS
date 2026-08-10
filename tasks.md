@@ -49,10 +49,21 @@ Completed 2026-08-10 — decisions recorded in [phase-0-decisions.md](phase-0-de
 - [x] **Permission fixes** — Admin-only nav items (Excel Import, Admin Control) no longer leak to other roles (`hasPermission` Admin fall-through bug), and the active view resets on user switch so a lower-privileged login can't inherit the previous user's screen
 - ~~Protected registration links~~ — dropped per Phase 0 decision D5: links stay public with mandatory review; auto-expiry at event end is covered above
 
-### Pending (needs backend decision + volume estimates)
+### Backend phase — implemented 2026-08-11 (Supabase; decisions: Supabase / small scale / Vercel)
 
-- [ ] **Real authentication** — actual credentials, password reset, and session security; remove the "any name logs in" mock (`AuthContext.jsx`) (PRD FR-6, module 1)
-- [ ] **Backend / persistent database** — replace `localStorage` with a server-side store so data survives across devices and users; multi-user concurrency (PRD assumption: web app becomes operational source of truth)
+- [x] **Backend / persistent database** — dual-mode data layer: with Supabase env vars configured the app loads from Postgres, writes through on every change (`src/lib/cloudSync.js`), caches locally for offline resilience, and refreshes via realtime subscriptions; without them it runs as the original localStorage sandbox. Schema + seed in `supabase/schema.sql`.
+- [x] **Real authentication** (cloud mode) — Supabase email/password login, forgot-password email flow with in-app password reset, roles/enabled flags in a `profiles` table auto-created per account; disabled profiles are signed out. Sandbox mode keeps mock logins.
+- [x] **Server-side permission enforcement** — row-level security policies mirror the D4 matrix independently of the UI (public form: insert-pending-only, no registry reads; imports/settings: Admin; corrections/reviews: Coordinator+).
+- [x] **Audit immutability** — `audit_logs` has insert-only policies; nobody can update or delete rows server-side.
+- [x] **Sandbox → cloud migration** — pre-cloud data is snapshotted automatically and uploadable from Admin Control ("Upload sandbox data to cloud").
+- [x] Setup + Vercel deployment guide: `SETUP-BACKEND.md`
+
+### Remaining (requires the user's Supabase/Vercel accounts)
+
+- [ ] Create the Supabase project, run `supabase/schema.sql`, create the admin account, and fill `.env.local` (steps 1–4 of SETUP-BACKEND.md)
+- [ ] Enable realtime replication on the six tables (step 6)
+- [ ] Deploy to Vercel with the env vars and set the Supabase Site URL (step 7)
+- [ ] End-to-end cloud testing once credentials exist (login, sync between two devices, RLS denials, password reset)
 
 ## Phase 2 — Registration and governance hardening
 

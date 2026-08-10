@@ -1,0 +1,197 @@
+-- ============================================================
+-- Sabha Mandal AMS — Supabase schema + row-level security
+-- Run this once in the Supabase SQL Editor (Dashboard → SQL).
+-- Safe to re-run: objects are created with IF NOT EXISTS / OR REPLACE.
+-- ============================================================
+
+-- ---------- Profiles (one row per auth user; holds role + enabled flag) ----------
+create table if not exists public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  name text not null default '',
+  role text not null default 'Attendance Volunteer'
+    check (role in ('Admin', 'Coordinator', 'Attendance Volunteer', 'Registration Volunteer')),
+  enabled boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+-- Auto-create a profile when an auth user is created (default: volunteer).
+-- Promote your first user to Admin manually — see SETUP-BACKEND.md.
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  insert into public.profiles (id, name)
+  values (new.id, coalesce(new.raw_user_meta_data->>'name', split_part(new.email, '@', 1)))
+  on conflict (id) do nothing;
+  return new;
+end $$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+-- ---------- Role helpers (mirror the D4 permission matrix) ----------
+create or replace function public.my_role()
+returns text language sql security definer stable set search_path = public as $$
+  select role from public.profiles where id = auth.uid() and enabled = true
+$$;
+
+create or replace function public.has_permission(required text)
+returns boolean language sql security definer stable set search_path = public as $$
+  select case
+    when public.my_role() is null then false
+    when public.my_role() = 'Admin' then true
+    when required = 'Admin' then false
+    when required = 'Coordinator' then public.my_role() = 'Coordinator'
+    when required = 'Registration Volunteer'
+      then public.my_role() in ('Coordinator', 'Registration Volunteer')
+    else true
+  end
+$$;
+
+-- ---------- Domain tables (columns mirror the app's camelCase fields) ----------
+create table if not exists public.sabhas (
+  name text primary key
+);
+
+create table if not exists public.karyakars (
+  name text primary key,
+  sabha text not null default 'Unassigned'
+);
+
+create table if not exists public.participants (
+  id text primary key,
+  name text not null,
+  phone text not null default '',
+  sabha text not null default 'Unassociated',
+  karyakar text not null default 'None Assigned',
+  guardian_details text not null default '',
+  created_at timestamptz not null default now(),
+  registered_for_event_id text,
+  is_new_registration boolean not null default false,
+  status text not null default 'approved'
+    check (status in ('approved', 'pending', 'rejected', 'linked', 'archived')),
+  linked_to_id text
+);
+create index if not exists participants_phone_idx on public.participants (phone);
+create index if not exists participants_status_idx on public.participants (status);
+
+create table if not exists public.events (
+  id text primary key,
+  name text not null,
+  date date not null,
+  start_time text not null default '16:00',
+  end_time text not null default '18:00',
+  sabha_mandal_scope text not null default 'All Sabhas',
+  status text not null default 'Draft' check (status in ('Draft', 'Active', 'Closed'))
+);
+
+create table if not exists public.attendance (
+  id text primary key,
+  event_id text not null references public.events(id) on delete cascade,
+  participant_id text not null references public.participants(id) on delete cascade,
+  status text not null default 'Present',
+  marked_at timestamptz not null default now(),
+  marked_by text not null default '',
+  unique (event_id, participant_id)
+);
+
+create table if not exists public.audit_logs (
+  id text primary key,
+  action text not null,
+  timestamp timestamptz not null default now(),
+  user_id text not null default '',
+  user_role text not null default '',
+  details text not null default ''
+);
+
+-- ---------- Row-level security ----------
+alter table public.profiles     enable row level security;
+alter table public.sabhas       enable row level security;
+alter table public.karyakars    enable row level security;
+alter table public.participants enable row level security;
+alter table public.events       enable row level security;
+alter table public.attendance   enable row level security;
+alter table public.audit_logs   enable row level security;
+
+-- Profiles: everyone signed-in reads their own; Admin reads/updates all.
+drop policy if exists profiles_select_own on public.profiles;
+create policy profiles_select_own on public.profiles
+  for select using (id = auth.uid() or public.has_permission('Admin'));
+drop policy if exists profiles_admin_update on public.profiles;
+create policy profiles_admin_update on public.profiles
+  for update using (public.has_permission('Admin'));
+
+-- Sabhas: readable by anyone (the public form lists them); writes are Admin.
+drop policy if exists sabhas_read on public.sabhas;
+create policy sabhas_read on public.sabhas for select using (true);
+drop policy if exists sabhas_write on public.sabhas;
+create policy sabhas_write on public.sabhas
+  for all using (public.has_permission('Admin')) with check (public.has_permission('Admin'));
+
+-- Karyakars: signed-in read; Admin writes.
+drop policy if exists karyakars_read on public.karyakars;
+create policy karyakars_read on public.karyakars for select using (auth.uid() is not null);
+drop policy if exists karyakars_write on public.karyakars;
+create policy karyakars_write on public.karyakars
+  for all using (public.has_permission('Admin')) with check (public.has_permission('Admin'));
+
+-- Events: readable by anyone (shared links show event info); writes Coordinator+.
+drop policy if exists events_read on public.events;
+create policy events_read on public.events for select using (true);
+drop policy if exists events_write on public.events;
+create policy events_write on public.events
+  for all using (public.has_permission('Coordinator')) with check (public.has_permission('Coordinator'));
+
+-- Participants: signed-in read. The PUBLIC form may only INSERT pending rows —
+-- it can never read the registry (BRD privacy rule). Registration Volunteer+
+-- inserts approved rows; edits are Coordinator+.
+drop policy if exists participants_read on public.participants;
+create policy participants_read on public.participants for select using (auth.uid() is not null);
+drop policy if exists participants_public_insert on public.participants;
+create policy participants_public_insert on public.participants
+  for insert with check (status = 'pending' or public.has_permission('Registration Volunteer'));
+drop policy if exists participants_update on public.participants;
+create policy participants_update on public.participants
+  for update using (public.has_permission('Coordinator'));
+drop policy if exists participants_delete on public.participants;
+create policy participants_delete on public.participants
+  for delete using (public.has_permission('Admin'));
+
+-- Attendance: signed-in read + insert (any volunteer marks present);
+-- corrections (delete) are Coordinator+; rows are never updated.
+drop policy if exists attendance_read on public.attendance;
+create policy attendance_read on public.attendance for select using (auth.uid() is not null);
+drop policy if exists attendance_insert on public.attendance;
+create policy attendance_insert on public.attendance
+  for insert with check (auth.uid() is not null);
+drop policy if exists attendance_delete on public.attendance;
+create policy attendance_delete on public.attendance
+  for delete using (public.has_permission('Coordinator'));
+
+-- Audit logs: append-only. Anyone (including the public form) can insert;
+-- Coordinator+ can read; nobody can update or delete → immutability.
+drop policy if exists audit_insert on public.audit_logs;
+create policy audit_insert on public.audit_logs for insert with check (true);
+drop policy if exists audit_read on public.audit_logs;
+create policy audit_read on public.audit_logs
+  for select using (public.has_permission('Coordinator'));
+
+-- ---------- Seed lookup data (matches the app's factory defaults) ----------
+insert into public.sabhas (name) values
+  ('Bal Sabha - Sub-group A1'),
+  ('Bal Sabha - Sub-group A2'),
+  ('Bal Sabha - Sub-group B1'),
+  ('Kishore Mandal - East Wing'),
+  ('Kishore Mandal - West Wing'),
+  ('Yuva Mandal - Youth')
+on conflict (name) do nothing;
+
+insert into public.karyakars (name, sabha) values
+  ('Ghanshyam Patel', 'Bal Sabha - Sub-group A1'),
+  ('Pramukh Swami Das', 'Bal Sabha - Sub-group B1'),
+  ('Akshar Patel', 'Kishore Mandal - East Wing'),
+  ('Mukund Dave', 'Bal Sabha - Sub-group A2'),
+  ('Yogi Joshi', 'Kishore Mandal - West Wing'),
+  ('Nilkanth Sharma', 'Yuva Mandal - Youth')
+on conflict (name) do nothing;

@@ -25,3 +25,8 @@ dist-ssr
 
 # Local Claude Code settings
 .claude/settings.local.json
+
+# Environment files (Supabase keys)
+.env
+.env.local
+.env.*.local

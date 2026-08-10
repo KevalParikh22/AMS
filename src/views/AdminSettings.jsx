@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useDb } from '../context/DbContext';
 import { useAuth, ROLES } from '../context/AuthContext';
+import { isCloudMode } from '../lib/supabase';
 import * as XLSX from 'xlsx';
 import {
   Trash2,
@@ -16,18 +17,20 @@ import {
 } from 'lucide-react';
 
 export default function AdminSettings() {
-  const { 
-    sabhas, 
-    karyakars, 
-    auditLogs, 
-    clearDatabase, 
+  const {
+    sabhas,
+    karyakars,
+    auditLogs,
+    clearDatabase,
     resetToFactoryDefault,
+    cloudStatus,
+    uploadLocalSandbox,
     setSabhas,
     setKaryakars,
     addAuditLog
   } = useDb();
 
-  const { user, users, addManagedUser, setManagedUserEnabled } = useAuth();
+  const { user, users, addManagedUser, setManagedUserEnabled, setManagedUserRole } = useAuth();
 
   // Lookup Entry Forms
   const [newSabha, setNewSabha] = useState('');
@@ -86,6 +89,16 @@ export default function AdminSettings() {
     }
     return true;
   });
+
+  const [migrateMsg, setMigrateMsg] = useState('');
+  const hasSandboxBackup = isCloudMode && !!localStorage.getItem('ams_sandbox_backup');
+
+  const handleUploadSandbox = async () => {
+    if (!window.confirm('Upload the saved local sandbox data into the cloud database? Existing cloud rows with the same IDs will be overwritten.')) return;
+    setMigrateMsg('Uploading...');
+    const result = await uploadLocalSandbox();
+    setMigrateMsg(result.success ? 'Sandbox data uploaded to the cloud successfully.' : result.message);
+  };
 
   const handleExportAuditLog = () => {
     const ws = XLSX.utils.json_to_sheet(filteredLogs.map(log => ({
@@ -278,6 +291,42 @@ export default function AdminSettings() {
         </div>
       </div>
 
+      {/* Data Backend Status */}
+      <div className="glass-panel" style={{ padding: '1.25rem 1.5rem', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <Database size={18} color="var(--accent)" />
+          <div>
+            <strong style={{ fontSize: '0.95rem' }}>
+              Data backend: {isCloudMode ? 'Supabase Cloud' : 'Local Sandbox (this device only)'}
+            </strong>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>
+              {isCloudMode
+                ? 'Data syncs across devices. Accounts are created in the Supabase dashboard; roles are assigned below.'
+                : 'Data lives in this browser’s storage. Configure Supabase (see SETUP-BACKEND.md) for multi-device sync and real logins.'}
+            </p>
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <span className={`badge ${
+            cloudStatus === 'online' ? 'badge-success' :
+            cloudStatus === 'local' ? 'badge-info' :
+            cloudStatus === 'syncing' ? 'badge-warning' : 'badge-danger'
+          }`}>
+            {cloudStatus === 'local' ? 'Sandbox' : cloudStatus}
+          </span>
+          {hasSandboxBackup && (
+            <button onClick={handleUploadSandbox} className="btn btn-secondary" style={{ padding: '0.45rem 0.9rem', fontSize: '0.8rem' }}>
+              Upload sandbox data to cloud
+            </button>
+          )}
+        </div>
+        {migrateMsg && (
+          <div className="badge badge-info" style={{ display: 'block', width: '100%', padding: '0.6rem', borderRadius: 'var(--radius-sm)' }}>
+            {migrateMsg}
+          </div>
+        )}
+      </div>
+
       {/* User Account Management */}
       <div className="glass-panel" style={{ padding: '1.5rem', borderRadius: 'var(--radius-md)' }}>
         <h3 style={{ fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
@@ -285,7 +334,9 @@ export default function AdminSettings() {
           <span>User Accounts & Roles</span>
         </h3>
         <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
-          Create volunteer/coordinator accounts and disable access when someone leaves. (Passwords arrive with the backend phase.)
+          {isCloudMode
+            ? 'Accounts are created in the Supabase dashboard (Authentication → Users). New accounts start as Attendance Volunteer — assign their real role and enable/disable access here.'
+            : 'Create volunteer/coordinator accounts and disable access when someone leaves. (Passwords arrive once cloud mode is configured.)'}
         </p>
 
         {userMsg && (
@@ -294,6 +345,7 @@ export default function AdminSettings() {
           </div>
         )}
 
+        {!isCloudMode && (
         <form onSubmit={handleAddUser} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem', alignItems: 'end' }}>
           <div className="form-group" style={{ marginBottom: 0 }}>
             <label className="form-label">Full Name</label>
@@ -316,6 +368,7 @@ export default function AdminSettings() {
             <span>Add User</span>
           </button>
         </form>
+        )}
 
         <div className="table-container">
           <table className="custom-table">
@@ -332,8 +385,25 @@ export default function AdminSettings() {
               {users.map(u => (
                 <tr key={u.username} style={{ opacity: u.enabled ? 1 : 0.55 }}>
                   <td style={{ fontWeight: 600 }}>{u.name}</td>
-                  <td style={{ color: 'var(--text-muted)' }}>@{u.username}</td>
-                  <td>{u.role}</td>
+                  <td style={{ color: 'var(--text-muted)' }}>
+                    {isCloudMode ? `#${String(u.username).slice(0, 8)}` : `@${u.username}`}
+                  </td>
+                  <td>
+                    {isCloudMode ? (
+                      <select
+                        className="form-control"
+                        value={u.role}
+                        onChange={(e) => setManagedUserRole(u.id, e.target.value)}
+                        disabled={u.id === user?.id}
+                        title={u.id === user?.id ? 'You cannot change your own role' : 'Assign role'}
+                        style={{ padding: '0.3rem 0.5rem', fontSize: '0.8rem', width: 'auto' }}
+                      >
+                        {Object.values(ROLES).map(r => (
+                          <option key={r} value={r}>{r}</option>
+                        ))}
+                      </select>
+                    ) : u.role}
+                  </td>
                   <td>
                     <span className={`badge ${u.enabled ? 'badge-success' : 'badge-danger'}`}>
                       {u.enabled ? 'Active' : 'Disabled'}
