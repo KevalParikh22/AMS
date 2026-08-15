@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useDb } from '../context/DbContext';
 import { useAuth } from '../context/AuthContext';
 import QrCode from '../components/QrCode';
+import Modal from '../components/Modal';
 import * as XLSX from 'xlsx';
 import {
   Download,
@@ -571,60 +572,62 @@ export default function Reports() {
       )}
 
       {/* Printable QR Badge Sheet overlay */}
-      {showBadgeSheet && (
-        <div className="badge-sheet-overlay" style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'var(--bg-primary)', zIndex: 1100,
-          overflowY: 'auto', padding: '1.5rem'
-        }}>
-          <div className="badge-sheet-toolbar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-            <h3 style={{ fontSize: '1.2rem', fontWeight: 700 }}>
-              QR Badge Sheet — {reportRoster.length} participant(s)
-            </h3>
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <button onClick={() => window.print()} className="btn btn-primary" style={{ padding: '0.5rem 1.25rem' }}>
-                <Printer size={14} />
-                <span>Print</span>
-              </button>
-              <button onClick={() => setShowBadgeSheet(false)} className="btn btn-secondary" style={{ padding: '0.5rem 1.25rem' }}>
-                <X size={14} />
-                <span>Close</span>
-              </button>
-            </div>
+      <Modal
+        open={showBadgeSheet}
+        variant="sheet"
+        className="badge-sheet-overlay"
+        zIndex="var(--z-print-sheet)"
+      >
+        <div className="badge-sheet-toolbar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+          <h3 style={{ fontSize: '1.2rem', fontWeight: 700 }}>
+            QR Badge Sheet — {reportRoster.length} participant(s)
+          </h3>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button onClick={() => window.print()} className="btn btn-primary" style={{ padding: '0.5rem 1.25rem' }}>
+              <Printer size={14} />
+              <span>Print</span>
+            </button>
+            <button onClick={() => setShowBadgeSheet(false)} className="btn btn-secondary" style={{ padding: '0.5rem 1.25rem' }}>
+              <X size={14} />
+              <span>Close</span>
+            </button>
           </div>
-
-          <div className="badge-sheet-grid" style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
-            gap: '0.75rem'
-          }}>
-            {reportRoster.map(p => (
-              <div key={p.id} className="qr-badge" style={{
-                backgroundColor: '#ffffff', color: '#111111',
-                border: '1px solid #cccccc', borderRadius: '8px',
-                padding: '0.9rem', textAlign: 'center',
-                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.4rem',
-                breakInside: 'avoid'
-              }}>
-                <QrCode value={p.id} size={110} />
-                <strong style={{ fontSize: '0.9rem' }}>{p.name}</strong>
-                <span style={{ fontSize: '0.75rem', color: '#555555' }}>{p.sabha}</span>
-                <span style={{ fontSize: '0.75rem', fontWeight: 700 }}>{p.id}</span>
-              </div>
-            ))}
-          </div>
-
-          {/* Print styles: badges only, white page */}
-          <style>{`
-            @media print {
-              body * { visibility: hidden; }
-              .badge-sheet-overlay, .badge-sheet-overlay * { visibility: visible; }
-              .badge-sheet-overlay { position: absolute !important; background: #fff !important; padding: 0 !important; }
-              .badge-sheet-toolbar { display: none !important; }
-            }
-          `}</style>
         </div>
-      )}
+
+        <div className="badge-sheet-grid" style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+          gap: '0.75rem'
+        }}>
+          {reportRoster.map(p => (
+            <div key={p.id} className="qr-badge" style={{
+              backgroundColor: '#ffffff', color: '#111111',
+              border: '1px solid #cccccc', borderRadius: '8px',
+              padding: '0.9rem', textAlign: 'center',
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.4rem',
+              breakInside: 'avoid'
+            }}>
+              <QrCode value={p.id} size={110} />
+              <strong style={{ fontSize: '0.9rem' }}>{p.name}</strong>
+              <span style={{ fontSize: '0.75rem', color: '#555555' }}>{p.sabha}</span>
+              <span style={{ fontSize: '0.75rem', fontWeight: 700 }}>{p.id}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Print styles: badges only, white page */}
+        <style>{`
+          @media print {
+            /* Modal locks body scrolling while open; overflow:hidden would truncate
+               the printout to a single page. */
+            body { overflow: visible !important; }
+            body * { visibility: hidden; }
+            .badge-sheet-overlay, .badge-sheet-overlay * { visibility: visible; }
+            .badge-sheet-overlay { position: absolute !important; background: #fff !important; padding: 0 !important; }
+            .badge-sheet-toolbar { display: none !important; }
+          }
+        `}</style>
+      </Modal>
 
       {/* Data Quality Tab: duplicate merge tools, archive, and exception history */}
       {activeTab === 'data-quality' && (

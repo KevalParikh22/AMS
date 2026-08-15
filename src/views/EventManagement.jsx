@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useDb } from '../context/DbContext';
-import { 
+import Modal from '../components/Modal';
+import {
   Calendar, 
   Plus, 
   Check, 
@@ -92,123 +93,104 @@ export default function EventManagement() {
       </div>
 
       {/* Modal Dialog for Event Creation */}
-      {showCreateModal && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.6)',
-          backdropFilter: 'blur(4px)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1000,
-          padding: '1rem'
-        }}>
-          <div className="card glass-panel" style={{
-            width: '100%',
-            maxWidth: '520px',
-            boxShadow: 'var(--shadow-lg)',
-            border: '1px solid var(--border-color)',
-            animation: 'fadeIn 0.2s ease-out'
-          }}>
-            <h3 style={{ fontSize: '1.25rem', marginBottom: '1.5rem', fontFamily: 'var(--font-display)' }}>Create Sabha Event</h3>
-            
-            <form onSubmit={handleCreateEvent} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              <div className="form-group">
-                <label className="form-label">Event Assembly Name</label>
-                <input 
-                  type="text" 
-                  className="form-control" 
-                  placeholder="e.g. Weekly Bal Sabha" 
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                />
-              </div>
+      <Modal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        maxWidth="520px"
+      >
+        <h3 style={{ fontSize: '1.25rem', marginBottom: '1.5rem', fontFamily: 'var(--font-display)' }}>Create Sabha Event</h3>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                <div className="form-group">
-                  <label className="form-label">Date</label>
-                  <input 
-                    type="date" 
-                    className="form-control" 
-                    value={date}
-                    onChange={(e) => setDate(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Sabha/Mandal Scope</label>
-                  <select 
-                    className="form-control" 
-                    value={sabhaScope} 
-                    onChange={(e) => setSabhaScope(e.target.value)}
-                  >
-                    <option value="All Sabhas">All Sabhas (Global)</option>
-                    {sabhas.map(s => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                <div className="form-group">
-                  <label className="form-label">Start Time</label>
-                  <input 
-                    type="time" 
-                    className="form-control" 
-                    value={startTime}
-                    onChange={(e) => setStartTime(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">End Time</label>
-                  <input 
-                    type="time" 
-                    className="form-control" 
-                    value={endTime}
-                    onChange={(e) => setEndTime(e.target.value)}
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Initial Status</label>
-                <select 
-                  className="form-control"
-                  value={status}
-                  onChange={(e) => setStatus(e.target.value)}
-                >
-                  <option value="Draft">Draft</option>
-                  <option value="Active">Active (Open for Attendance)</option>
-                </select>
-              </div>
-
-              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end', marginTop: '1rem' }}>
-                <button 
-                  type="button" 
-                  className="btn btn-secondary" 
-                  onClick={() => setShowCreateModal(false)}
-                >
-                  Cancel
-                </button>
-                <button 
-                  type="submit" 
-                  className="btn btn-primary"
-                >
-                  Create Event
-                </button>
-              </div>
-            </form>
+        <form onSubmit={handleCreateEvent} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          <div className="form-group">
+            <label className="form-label">Event Assembly Name</label>
+            <input
+              type="text"
+              className="form-control"
+              placeholder="e.g. Weekly Bal Sabha"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+            />
           </div>
-        </div>
-      )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <div className="form-group">
+              <label className="form-label">Date</label>
+              <input
+                type="date"
+                className="form-control"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Sabha/Mandal Scope</label>
+              <select
+                className="form-control"
+                value={sabhaScope}
+                onChange={(e) => setSabhaScope(e.target.value)}
+              >
+                <option value="All Sabhas">All Sabhas (Global)</option>
+                {sabhas.map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <div className="form-group">
+              <label className="form-label">Start Time</label>
+              <input
+                type="time"
+                className="form-control"
+                value={startTime}
+                onChange={(e) => setStartTime(e.target.value)}
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">End Time</label>
+              <input
+                type="time"
+                className="form-control"
+                value={endTime}
+                onChange={(e) => setEndTime(e.target.value)}
+                required
+              />
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Initial Status</label>
+            <select
+              className="form-control"
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+            >
+              <option value="Draft">Draft</option>
+              <option value="Active">Active (Open for Attendance)</option>
+            </select>
+          </div>
+
+          <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end', marginTop: '1rem' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setShowCreateModal(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="btn btn-primary"
+            >
+              Create Event
+            </button>
+          </div>
+        </form>
+      </Modal>
 
       {/* Grid of Existing Events */}
       <div style={{

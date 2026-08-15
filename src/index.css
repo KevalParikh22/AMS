@@ -42,6 +42,11 @@
   
   --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   --transition-fast: all 0.15s ease;
+
+  /* Stacking order — the single source of truth for overlay layering */
+  --z-sidebar: 100;
+  --z-modal: 1000;
+  --z-print-sheet: 1100;
 }
 
 /* Light Mode Overrides if system/user wants light mode */
@@ -356,8 +361,18 @@ select.form-control {
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* No `forwards` here on purpose: the keyframe animates `transform`, and a retained
+   transform would turn every view root into a containing block for `position: fixed`
+   children (trapping modals inside the scrolling content area). Without the fill mode
+   the element settles back to its natural `transform: none` once the animation ends. */
 .animate-fade-in {
-  animation: fadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: fadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Modal panel entrance — opacity only, so the panel never becomes a containing block. */
+@keyframes modalIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* Attendance Swipe/Tap Layouts */

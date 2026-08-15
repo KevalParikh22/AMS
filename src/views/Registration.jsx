@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useDb } from '../context/DbContext';
 import { useAuth } from '../context/AuthContext';
 import QrCode from '../components/QrCode';
+import Modal from '../components/Modal';
 import {
   UserPlus,
   AlertTriangle,
@@ -345,91 +346,76 @@ export default function Registration({ setView, selectedEventId }) {
       </div>
 
       {/* Potential Duplicate Modal Warning */}
-      {showDuplicateModal && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.6)',
-          backdropFilter: 'blur(4px)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1000,
-          padding: '1rem'
-        }}>
-          <div className="card glass-panel animate-fade-in" style={{
-            width: '100%',
-            maxWidth: '540px',
-            border: '1px solid var(--warning)'
+      {/* A decision prompt, not a dismissible dialog: the volunteer must pick an
+          outcome, so backdrop clicks and Escape must not close it. */}
+      <Modal
+        open={showDuplicateModal}
+        maxWidth="540px"
+        style={{ border: '1px solid var(--warning)' }}
+      >
+        <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start', marginBottom: '1.25rem' }}>
+          <div style={{
+            backgroundColor: 'var(--warning-light)',
+            color: 'var(--warning)',
+            padding: '0.5rem',
+            borderRadius: 'var(--radius-sm)'
           }}>
-            <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start', marginBottom: '1.25rem' }}>
-              <div style={{
-                backgroundColor: 'var(--warning-light)',
-                color: 'var(--warning)',
-                padding: '0.5rem',
-                borderRadius: 'var(--radius-sm)'
-              }}>
-                <AlertTriangle size={24} />
-              </div>
-              <div>
-                <h3 style={{ fontSize: '1.2rem', fontWeight: 700, margin: 0 }}>Potential Duplicate Match</h3>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.25rem' }}>
-                  A participant with a matching name or phone number already exists in the central registry database.
-                </p>
-              </div>
-            </div>
-
-            {/* List of potential matches */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
-              {duplicates.map(dup => (
-                <div key={dup.id} style={{
-                  backgroundColor: 'var(--bg-primary)',
-                  padding: '1rem',
-                  borderRadius: 'var(--radius-sm)',
-                  border: '1px solid var(--border-color)',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center'
-                }}>
-                  <div>
-                    <h4 style={{ fontSize: '0.95rem', fontWeight: 600 }}>{dup.name}</h4>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0.15rem 0 0 0' }}>
-                      Phone: {dup.phone} | Sabha: {dup.sabha}
-                    </p>
-                  </div>
-                  <button 
-                    onClick={() => handleUseExisting(dup)}
-                    className="btn btn-secondary"
-                    style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', gap: '0.25rem' }}
-                  >
-                    <LinkIcon size={12} />
-                    <span>Select Existing</span>
-                  </button>
-                </div>
-              ))}
-            </div>
-
-            {/* Actions */}
-            <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
-              <button 
-                className="btn btn-ghost" 
-                onClick={() => setShowDuplicateModal(false)}
-              >
-                Go Back & Edit
-              </button>
-              <button 
-                className="btn btn-danger" 
-                onClick={handleForceRegister}
-              >
-                Ignore Match & Register
-              </button>
-            </div>
+            <AlertTriangle size={24} />
+          </div>
+          <div>
+            <h3 style={{ fontSize: '1.2rem', fontWeight: 700, margin: 0 }}>Potential Duplicate Match</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.25rem' }}>
+              A participant with a matching name or phone number already exists in the central registry database.
+            </p>
           </div>
         </div>
-      )}
+
+        {/* List of potential matches */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
+          {duplicates.map(dup => (
+            <div key={dup.id} style={{
+              backgroundColor: 'var(--bg-primary)',
+              padding: '1rem',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid var(--border-color)',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center'
+            }}>
+              <div>
+                <h4 style={{ fontSize: '0.95rem', fontWeight: 600 }}>{dup.name}</h4>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0.15rem 0 0 0' }}>
+                  Phone: {dup.phone} | Sabha: {dup.sabha}
+                </p>
+              </div>
+              <button
+                onClick={() => handleUseExisting(dup)}
+                className="btn btn-secondary"
+                style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', gap: '0.25rem' }}
+              >
+                <LinkIcon size={12} />
+                <span>Select Existing</span>
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {/* Actions */}
+        <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setShowDuplicateModal(false)}
+          >
+            Go Back & Edit
+          </button>
+          <button
+            className="btn btn-danger"
+            onClick={handleForceRegister}
+          >
+            Ignore Match & Register
+          </button>
+        </div>
+      </Modal>
     </div>
   );
 }
