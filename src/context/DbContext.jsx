@@ -438,6 +438,53 @@ export const DbProvider = ({ children }) => {
     .sort((a, b) => b.score - a.score);
   }, [participants]);
 
+  // Add sabhas/karyakars an import referenced but that aren't configured yet.
+  // Goes through saveToStorage so cloud mode syncs both lookup tables (Admin only, per D4).
+  const addLookupEntries = ({ sabhas: newSabhaNames = [], karyakars: newKaryakarEntries = [] }) => {
+    if (!hasPermission(ROLES.ADMIN)) {
+      return { error: 'Only administrators can edit master data.' };
+    }
+
+    const addedSabhas = [];
+    const updatedSabhas = [...sabhas];
+    newSabhaNames.forEach(rawName => {
+      const name = String(rawName || '').trim();
+      if (!name || updatedSabhas.includes(name)) return;
+      updatedSabhas.push(name);
+      addedSabhas.push(name);
+    });
+
+    const addedKaryakars = [];
+    const updatedKaryakars = [...karyakars];
+    newKaryakarEntries.forEach(entry => {
+      const name = String(entry?.name || '').trim();
+      if (!name || updatedKaryakars.some(k => k.name === name)) return;
+      const sabha = String(entry?.sabha || '').trim() || 'Unassigned';
+      updatedKaryakars.push({ name, sabha });
+      addedKaryakars.push({ name, sabha });
+    });
+
+    if (addedSabhas.length > 0) {
+      setSabhas(updatedSabhas);
+      saveToStorage('ams_sabhas', updatedSabhas);
+    }
+    if (addedKaryakars.length > 0) {
+      setKaryakars(updatedKaryakars);
+      saveToStorage('ams_karyakars', updatedKaryakars);
+    }
+
+    if (addedSabhas.length > 0 || addedKaryakars.length > 0) {
+      addAuditLog(
+        'Add Import Lookups',
+        `Created ${addedSabhas.length} sabha(s) and ${addedKaryakars.length} karyakar(s) referenced by an imported roster.` +
+        (addedSabhas.length ? ` Sabhas: ${addedSabhas.join(', ')}.` : '') +
+        (addedKaryakars.length ? ` Karyakars: ${addedKaryakars.map(k => `${k.name} → ${k.sabha}`).join(', ')}.` : '')
+      );
+    }
+
+    return { addedSabhas, addedKaryakars };
+  };
+
   // Register or insert spreadsheet imports (Admin only, per decision D4)
   const importExcelData = (parsedRows) => {
     if (!hasPermission(ROLES.ADMIN)) {
@@ -883,6 +930,8 @@ export const DbProvider = ({ children }) => {
       uploadLocalSandbox,
       setSabhas,
       setKaryakars,
+      addLookupEntries,
+      saveToStorage,
       addAuditLog
     }}>
       {children}

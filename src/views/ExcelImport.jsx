@@ -1,12 +1,13 @@
 import React, { useState, useRef } from 'react';
 import { useDb } from '../context/DbContext';
 import * as XLSX from 'xlsx';
-import { 
-  UploadCloud, 
-  CheckCircle2, 
-  AlertTriangle, 
-  RefreshCw, 
+import {
+  UploadCloud,
+  CheckCircle2,
+  AlertTriangle,
+  RefreshCw,
   HelpCircle,
+  Download,
   FileSpreadsheet
 } from 'lucide-react';
 
@@ -18,19 +19,84 @@ const REQUIRED_FIELDS = {
   guardianDetails: { label: 'Guardian Info', required: false, synonyms: ['guardian', 'parent', 'guardian contact details', 'father', 'mother'] }
 };
 
+// Canonical five-column template from decision D2. The importer still allows
+// column mapping, so a real sheet's headers need not match these exactly.
+const SAMPLE_HEADERS = ['Name', 'Phone', 'Mandal-Sabha', 'Karyakar Name', 'Guardian Contact Details'];
+
 export default function ExcelImport() {
-  const { importExcelData, participants } = useDb();
-  
+  const { importExcelData, participants, sabhas, karyakars, addLookupEntries } = useDb();
+
   const [file, setFile] = useState(null);
   const [headers, setHeaders] = useState([]);
   const [rawRows, setRawRows] = useState([]); // Array of arrays from row 1 onwards
   const [mappings, setMappings] = useState({});
   const [previewRows, setPreviewRows] = useState([]);
   const [previewStats, setPreviewStats] = useState(null);
+  const [lookupIssues, setLookupIssues] = useState(null);
+  const [lookupsCreated, setLookupsCreated] = useState(null);
   const [importSummary, setImportSummary] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
-  
+
   const fileInputRef = useRef(null);
+
+  // Build a sample roster from the sabhas/karyakars actually configured here, so the
+  // file doubles as a reference for which values this system will recognise.
+  const handleDownloadSample = () => {
+    const rows = [];
+    karyakars.forEach((k, i) => {
+      rows.push({
+        'Name': `Sample Balak ${i + 1}`,
+        'Phone': `90000000${String(i + 1).padStart(2, '0')}`,
+        'Mandal-Sabha': k.sabha,
+        'Karyakar Name': k.name,
+        'Guardian Contact Details': `Guardian ${i + 1} - 91000000${String(i + 1).padStart(2, '0')}`
+      });
+    });
+
+    // Sabhas with no karyakar still get a row, showing the karyakar column is optional.
+    sabhas
+      .filter(s => !karyakars.some(k => k.sabha === s))
+      .forEach((s, i) => {
+        const n = karyakars.length + i + 1;
+        rows.push({
+          'Name': `Sample Balak ${n}`,
+          'Phone': `90000000${String(n).padStart(2, '0')}`,
+          'Mandal-Sabha': s,
+          'Karyakar Name': '',
+          'Guardian Contact Details': `Guardian ${n} - 91000000${String(n).padStart(2, '0')}`
+        });
+      });
+
+    if (rows.length === 0) {
+      rows.push({
+        'Name': 'Sample Balak 1',
+        'Phone': '9000000001',
+        'Mandal-Sabha': 'Bal Sabha - Sub-group A1',
+        'Karyakar Name': 'Karyakar Name',
+        'Guardian Contact Details': 'Guardian 1 - 9100000001'
+      });
+    }
+
+    const ws = XLSX.utils.json_to_sheet(rows, { header: SAMPLE_HEADERS });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Roster');
+    XLSX.writeFile(wb, 'sample_roster.csv', { bookType: 'csv' });
+  };
+
+  // Create the sabhas/karyakars this file referenced but that aren't configured yet.
+  const handleCreateLookups = () => {
+    if (!lookupIssues) return;
+    const result = addLookupEntries({
+      sabhas: lookupIssues.unknownSabhas,
+      karyakars: lookupIssues.unknownKaryakars
+    });
+    if (result.error) {
+      setErrorMsg(result.error);
+      return;
+    }
+    setLookupsCreated(result);
+    setLookupIssues({ ...lookupIssues, unknownSabhas: [], unknownKaryakars: [] });
+  };
 
   // File Upload Handler
   const handleFileChange = (e) => {
@@ -54,8 +120,11 @@ export default function ExcelImport() {
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
         
-        // Parse sheet as raw matrix [ [col1, col2], [val1, val2] ]
-        const matrix = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+        // Parse sheet as raw matrix [ [col1, col2], [val1, val2] ].
+        // raw: false keeps cells as formatted text — without it a phone like
+        // 0987654321 is read as a number and loses its leading zero, corrupting
+        // the unique participant key (decision D3).
+        const matrix = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '', raw: false });
         
         if (matrix.length === 0) {
           setErrorMsg('The uploaded sheet is empty.');
@@ -82,7 +151,7 @@ export default function ExcelImport() {
         });
         
         setMappings(initialMappings);
-        generatePreview(sheetRows, initialMappings, sheetHeaders);
+        generatePreview(sheetRows, initialMappings);
       } catch (err) {
         console.error(err);
         setErrorMsg('Error reading file. Make sure the file is not corrupted.');
@@ -92,9 +161,14 @@ export default function ExcelImport() {
   };
 
   // Analyze ALL rows so duplicates/ambiguities are identified before import (FR-1)
-  const generatePreview = (rows, currentMappings, currentHeaders) => {
+  const generatePreview = (rows, currentMappings) => {
     const seenPhones = new Set();
     const stats = { new: 0, update: 0, unchanged: 0, review: 0, duplicate: 0, rejected: 0 };
+
+    // Lookup consistency, collected in the same pass
+    const unknownSabhas = new Map();
+    const unknownKaryakars = new Map();
+    const mismatches = new Map();
 
     const analyzed = rows.map((row, rowIdx) => {
       const parsedRow = {};
@@ -137,18 +211,56 @@ export default function ExcelImport() {
       }
       stats[status]++;
 
-      return { id: rowIdx, data: parsedRow, status, note };
+      // Sabha/karyakar lookup checks — skipped for rows the importer will drop
+      const lookupWarnings = [];
+      if (status !== 'rejected' && status !== 'duplicate') {
+        const configuredKaryakar = parsedRow.karyakar
+          ? karyakars.find(k => k.name === parsedRow.karyakar)
+          : null;
+
+        const sabhaKnown = parsedRow.sabha ? sabhas.includes(parsedRow.sabha) : true;
+
+        if (parsedRow.sabha && !sabhaKnown) {
+          unknownSabhas.set(parsedRow.sabha, true);
+          lookupWarnings.push('Unknown sabha');
+        }
+        if (parsedRow.karyakar && !configuredKaryakar) {
+          // Keyed by name: the row's sabha is the assignment we would create.
+          if (!unknownKaryakars.has(parsedRow.karyakar)) {
+            unknownKaryakars.set(parsedRow.karyakar, { name: parsedRow.karyakar, sabha: parsedRow.sabha });
+          }
+          lookupWarnings.push('Unknown karyakar');
+        }
+        // Only meaningful once the sabha itself is recognised — otherwise the
+        // unknown-sabha warning above already covers this row.
+        if (configuredKaryakar && parsedRow.sabha && sabhaKnown && configuredKaryakar.sabha !== parsedRow.sabha) {
+          mismatches.set(parsedRow.karyakar, {
+            name: parsedRow.karyakar,
+            configuredSabha: configuredKaryakar.sabha,
+            rowSabha: parsedRow.sabha
+          });
+          lookupWarnings.push('Karyakar mapped to a different sabha');
+        }
+      }
+
+      return { id: rowIdx, data: parsedRow, status, note, lookupWarnings };
     });
 
     setPreviewStats(stats);
     setPreviewRows(analyzed.slice(0, 10));
+    setLookupsCreated(null);
+    setLookupIssues({
+      unknownSabhas: [...unknownSabhas.keys()],
+      unknownKaryakars: [...unknownKaryakars.values()],
+      mismatches: [...mismatches.values()]
+    });
   };
 
   // Handle mapping updates
   const handleMappingChange = (fieldKey, colIdx) => {
     const updated = { ...mappings, [fieldKey]: parseInt(colIdx) };
     setMappings(updated);
-    generatePreview(rawRows, updated, headers);
+    generatePreview(rawRows, updated);
   };
 
   // Trigger spreadsheet ingestion
@@ -197,6 +309,8 @@ export default function ExcelImport() {
     setMappings({});
     setPreviewRows([]);
     setPreviewStats(null);
+    setLookupIssues(null);
+    setLookupsCreated(null);
   };
 
   const handleReset = () => {
@@ -206,6 +320,8 @@ export default function ExcelImport() {
     setMappings({});
     setPreviewRows([]);
     setPreviewStats(null);
+    setLookupIssues(null);
+    setLookupsCreated(null);
     setImportSummary(null);
     setErrorMsg('');
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -225,6 +341,49 @@ export default function ExcelImport() {
         <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: '1.6' }}>
           Upload a master roster. The importer allows column-mapping so you don't need fixed spreadsheets headers. If a participant phone number is already registered in the registry, their information will be updated instead of duplicated.
         </p>
+
+        {/* Column contract — driven off REQUIRED_FIELDS so it can never drift from the auto-mapper */}
+        <div style={{ marginTop: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+            <h4 style={{ fontSize: '0.95rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              <HelpCircle size={16} color="var(--accent)" />
+              <span>Expected columns</span>
+            </h4>
+            <button onClick={handleDownloadSample} className="btn btn-secondary" style={{ padding: '0.5rem 1rem' }}>
+              <Download size={14} />
+              <span>Download sample CSV</span>
+            </button>
+          </div>
+
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', minWidth: '520px' }}>
+              <thead>
+                <tr style={{ textAlign: 'left', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-color)' }}>
+                  <th style={{ padding: '0.5rem 0.75rem 0.5rem 0' }}>Column</th>
+                  <th style={{ padding: '0.5rem 0.75rem' }}>Required</th>
+                  <th style={{ padding: '0.5rem 0' }}>Headers recognised automatically</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(REQUIRED_FIELDS).map(([fieldKey, config]) => (
+                  <tr key={fieldKey} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                    <td style={{ padding: '0.6rem 0.75rem 0.6rem 0', fontWeight: 600 }}>{config.label}</td>
+                    <td style={{ padding: '0.6rem 0.75rem' }}>
+                      <span className={`badge ${config.required ? 'badge-danger' : 'badge-info'}`}>
+                        {config.required ? 'Required' : 'Optional'}
+                      </span>
+                    </td>
+                    <td style={{ padding: '0.6rem 0', color: 'var(--text-secondary)' }}>{config.synonyms.join(', ')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: 0, lineHeight: '1.6' }}>
+            The sample is generated from this system's configured sabhas and karyakars, so each row shows a valid Mandal-Sabha paired with the karyakar assigned to it. Names or headers that differ can still be mapped by hand after upload.
+          </p>
+        </div>
       </div>
 
       {errorMsg && (
@@ -352,6 +511,71 @@ export default function ExcelImport() {
             </div>
           )}
 
+          {/* Sabha / karyakar values this file references but that aren't configured */}
+          {lookupIssues && (lookupIssues.unknownSabhas.length > 0 || lookupIssues.unknownKaryakars.length > 0 || lookupIssues.mismatches.length > 0) && (
+            <div style={{
+              backgroundColor: 'var(--warning-light)',
+              border: '1px solid var(--warning)',
+              borderRadius: 'var(--radius-md)',
+              padding: '1.25rem',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.85rem'
+            }}>
+              <h4 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: '0.5rem', margin: 0 }}>
+                <AlertTriangle size={18} />
+                <span>Unrecognised sabha / karyakar values</span>
+              </h4>
+
+              {lookupIssues.unknownSabhas.length > 0 && (
+                <div style={{ fontSize: '0.85rem' }}>
+                  <strong>{lookupIssues.unknownSabhas.length} sabha(s) not configured:</strong>{' '}
+                  <span style={{ color: 'var(--text-secondary)' }}>{lookupIssues.unknownSabhas.join(', ')}</span>
+                </div>
+              )}
+
+              {lookupIssues.unknownKaryakars.length > 0 && (
+                <div style={{ fontSize: '0.85rem' }}>
+                  <strong>{lookupIssues.unknownKaryakars.length} karyakar(s) not configured:</strong>{' '}
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    {lookupIssues.unknownKaryakars.map(k => `${k.name} → ${k.sabha || 'Unassigned'}`).join(', ')}
+                  </span>
+                </div>
+              )}
+
+              {lookupIssues.mismatches.length > 0 && (
+                <div style={{ fontSize: '0.85rem' }}>
+                  <strong>{lookupIssues.mismatches.length} karyakar(s) mapped to a different sabha here:</strong>{' '}
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    {lookupIssues.mismatches.map(m => `${m.name} (configured: ${m.configuredSabha}, file: ${m.rowSabha})`).join('; ')}
+                  </span>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '0.35rem 0 0 0' }}>
+                    The existing mapping is left untouched — rows import with the values in the file. Change the assignment in Admin Settings if the file is correct.
+                  </p>
+                </div>
+              )}
+
+              {(lookupIssues.unknownSabhas.length > 0 || lookupIssues.unknownKaryakars.length > 0) && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+                  <button onClick={handleCreateLookups} className="btn btn-primary" style={{ padding: '0.5rem 1rem' }}>
+                    <CheckCircle2 size={14} />
+                    <span>Create missing entries</span>
+                  </button>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                    …or correct the spelling in your file and upload it again.
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {lookupsCreated && (
+            <div className="badge badge-success" style={{ padding: '0.85rem', borderRadius: 'var(--radius-sm)', display: 'block', width: '100%', fontSize: '0.85rem' }}>
+              <CheckCircle2 size={14} style={{ verticalAlign: 'text-bottom', marginRight: '0.4rem' }} />
+              Added {lookupsCreated.addedSabhas.length} sabha(s) and {lookupsCreated.addedKaryakars.length} karyakar(s) to the lookup lists.
+            </div>
+          )}
+
           {/* Verification Preview Table */}
           <div>
             <h4 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -382,6 +606,15 @@ export default function ExcelImport() {
                         {pRow.data.guardianDetails || <span style={{ color: 'var(--text-muted)' }}>-</span>}
                       </td>
                       <td>
+                        {pRow.lookupWarnings?.length > 0 && (
+                          <div
+                            style={{ color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', marginBottom: '0.25rem' }}
+                            title={pRow.lookupWarnings.join(' · ')}
+                          >
+                            <AlertTriangle size={11} />
+                            <span>{pRow.lookupWarnings.join(' · ')}</span>
+                          </div>
+                        )}
                         {pRow.status === 'rejected' ? (
                           <div style={{ color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem' }} title={pRow.note}>
                             <AlertTriangle size={12} />
