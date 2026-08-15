@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth, ROLES } from './AuthContext';
 import { isCloudMode } from '../lib/supabase';
-import { fetchAllTables, fetchTable, pushTable, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
+import { fetchAllTables, fetchTable, pushTable, insertRow, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
+import { extractGuardianPhone, normalizePhone, participantKey } from '../lib/participantIdentity';
 
 const DbContext = createContext();
 
@@ -160,6 +161,19 @@ const nextSeqId = (prefix, counterKey, list) => {
   const next = Math.max(stored, maxExisting) + 1;
   localStorage.setItem(counterKey, String(next));
   return prefix + next;
+};
+
+// Id for an anonymous public submission. It cannot use nextSeqId: RLS hides
+// every existing participant from an unauthenticated visitor, so the counter
+// would restart at P-101 and collide with a real record. Timestamp keeps ids
+// roughly ordered; the random half carries the uniqueness. A timestamp plus
+// only a few random chars is NOT enough — ids minted in the same millisecond
+// collide measurably (~8 per 20k draws with 4 random chars).
+const publicSubmissionId = () => {
+  const random = globalThis.crypto?.randomUUID
+    ? globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+    : `${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 8)}`;
+  return `PUB-${Date.now().toString(36)}${random}`;
 };
 
 // Migrate legacy participant records (pendingReview flags, "[REJECTED]" name
@@ -417,20 +431,23 @@ export const DbProvider = ({ children }) => {
     return searchable.map(p => {
       let score = 0;
       const name = p.name.toLowerCase();
-      const phone = p.phone.toLowerCase();
-      const sabha = p.sabha.toLowerCase();
-      const karyakar = p.karyakar.toLowerCase();
-      
-      // Match algorithms
+      const phone = String(p.phone || '').toLowerCase();
+      const sabha = String(p.sabha || '').toLowerCase();
+      const karyakar = String(p.karyakar || '').toLowerCase();
+      const guardian = String(p.guardianDetails || '').toLowerCase();
+
+      // Match algorithms. The number is the guardian's, so a guardian looking
+      // themselves up by their own name should find their balak too.
       if (phone === query) score += 100;
       else if (phone.includes(query)) score += 50;
-      
+
       if (name === query) score += 90;
       else if (name.startsWith(query)) score += 60;
       else if (name.includes(query)) score += 30;
       
       if (sabha.includes(query)) score += 20;
       if (karyakar.includes(query)) score += 15;
+      if (guardian.includes(query)) score += 10;
       
       return { item: p, score };
     })
@@ -497,18 +514,22 @@ export const DbProvider = ({ children }) => {
     let review = 0;
     let duplicates = 0;
     const newParticipantsList = [...participants];
-    const seenPhonesInFile = new Set();
+    const seenKeysInFile = new Set();
 
     parsedRows.forEach(row => {
       const name = String(row.name || '').trim();
-      const phone = String(row.phone || '').trim();
+      const guardianDetails = String(row.guardianDetails || '').trim();
+      // Rosters carry the guardian's number in the free-text guardian column;
+      // an explicit phone value still wins if the sheet supplies one.
+      const phone = normalizePhone(row.phone) || extractGuardianPhone(guardianDetails);
 
       if (!name) {
         rejected++;
         return;
       }
 
-      // No phone = no unique identifier: create flagged for manual review (decision D3)
+      // No contactable guardian number = no unique identifier: create flagged
+      // for manual review (decision D3, as revised for guardian-held contacts)
       if (!phone) {
         newParticipantsList.push({
           id: nextSeqId('P-', 'ams_seq_participant', newParticipantsList),
@@ -516,7 +537,7 @@ export const DbProvider = ({ children }) => {
           phone: '',
           sabha: row.sabha || 'Unassociated',
           karyakar: row.karyakar || 'None Assigned',
-          guardianDetails: row.guardianDetails || '',
+          guardianDetails,
           createdAt: new Date().toISOString(),
           isNewRegistration: false,
           status: 'pending'
@@ -525,15 +546,17 @@ export const DbProvider = ({ children }) => {
         return;
       }
 
-      // Duplicate row within the same file: skip so the first occurrence wins
-      if (seenPhonesInFile.has(phone)) {
+      // Duplicate row within the same file: skip so the first occurrence wins.
+      // Keyed on name + number so siblings on one guardian number both import.
+      const rowKey = participantKey(name, phone);
+      if (seenKeysInFile.has(rowKey)) {
         duplicates++;
         return;
       }
-      seenPhonesInFile.add(phone);
+      seenKeysInFile.add(rowKey);
 
       const existingIdx = newParticipantsList.findIndex(
-        p => p.phone.trim() === phone && (p.status === 'approved' || p.status === 'pending')
+        p => participantKey(p.name, p.phone) === rowKey && (p.status === 'approved' || p.status === 'pending')
       );
 
       if (existingIdx > -1) {
@@ -541,11 +564,13 @@ export const DbProvider = ({ children }) => {
         const merged = {
           ...existing,
           name: name || existing.name,
+          phone: phone || existing.phone,
           sabha: row.sabha || existing.sabha,
           karyakar: row.karyakar || existing.karyakar,
-          guardianDetails: row.guardianDetails || existing.guardianDetails
+          guardianDetails: guardianDetails || existing.guardianDetails
         };
         const isSame = merged.name === existing.name &&
+          merged.phone === existing.phone &&
           merged.sabha === existing.sabha &&
           merged.karyakar === existing.karyakar &&
           merged.guardianDetails === existing.guardianDetails;
@@ -562,7 +587,7 @@ export const DbProvider = ({ children }) => {
           phone,
           sabha: row.sabha || 'Unassociated',
           karyakar: row.karyakar || 'None Assigned',
-          guardianDetails: row.guardianDetails || '',
+          guardianDetails,
           createdAt: new Date().toISOString(),
           isNewRegistration: false,
           status: 'approved'
@@ -701,25 +726,47 @@ export const DbProvider = ({ children }) => {
     if (!isPublicSubmission && !hasPermission(ROLES.REGISTRATION_VOLUNTEER)) {
       return { error: 'Only registration volunteers, coordinators, or admins can register participants directly.' };
     }
-    const phone = String(formData.phone || '').trim();
-    const newId = nextSeqId('P-', 'ams_seq_participant', participants);
+    const guardianDetails = String(formData.guardianDetails || '').trim();
+    // Same rule as the importer: the contact number is the guardian's, and the
+    // free-text guardian field is a fallback source for it.
+    const phone = normalizePhone(formData.phone) || extractGuardianPhone(guardianDetails);
+    // An anonymous visitor cannot read the participants table (RLS), so its
+    // local list is empty and nextSeqId would restart at P-101 and collide with
+    // a real record. Public submissions get an id that needs no prior reads.
+    const newId = isPublicSubmission
+      ? publicSubmissionId()
+      : nextSeqId('P-', 'ams_seq_participant', participants);
     const newP = {
       id: newId,
       name: formData.name,
       phone,
       sabha: formData.sabha,
       karyakar: formData.karyakar || 'None Assigned',
-      guardianDetails: formData.guardianDetails || '',
+      guardianDetails,
       createdAt: new Date().toISOString(),
       registeredForEventId: eventId || null,
       isNewRegistration: true,
-      // No phone = no unique identifier: force manual review (decision D3)
+      // No guardian number = no unique identifier: force manual review (D3)
       status: (!phone || isPublicSubmission) ? 'pending' : 'approved'
     };
 
     const updatedParticipants = [...participants, newP];
     setParticipants(updatedParticipants);
-    saveToStorage('ams_participants', updatedParticipants);
+
+    if (isPublicSubmission && isCloudMode) {
+      // Insert just this row rather than reconciling the whole (RLS-emptied)
+      // array, and hand the caller the in-flight write so the public form can
+      // report a real failure instead of showing a false success receipt.
+      localStorage.setItem('ams_participants', JSON.stringify(updatedParticipants));
+      newP.syncPromise = insertRow('ams_participants', newP)
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          setCloudStatus('error');
+          throw err;
+        });
+    } else {
+      saveToStorage('ams_participants', updatedParticipants);
+    }
 
     addAuditLog(
       'New Participant Registration',

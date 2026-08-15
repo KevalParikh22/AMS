@@ -61,7 +61,9 @@ export default function Registration({ setView, selectedEventId }) {
     e.preventDefault();
     if (!name.trim() || !phone.trim()) return;
 
-    // Check existing participants by exact phone or near-name match
+    // Check existing participants by exact guardian number or near-name match.
+    // Siblings legitimately share a guardian number, so a number-only hit is a
+    // prompt for the volunteer to eyeball, not evidence of a duplicate.
     const queryName = name.toLowerCase().trim();
     const queryPhone = phone.trim();
 
@@ -235,7 +237,7 @@ export default function Registration({ setView, selectedEventId }) {
           </div>
 
           <div className="form-group">
-            <label className="form-label">Contact Phone Number *</label>
+            <label className="form-label">Guardian Mobile Number *</label>
             <input 
               type="tel" 
               className="form-control" 
@@ -365,7 +367,7 @@ export default function Registration({ setView, selectedEventId }) {
           <div>
             <h3 style={{ fontSize: '1.2rem', fontWeight: 700, margin: 0 }}>Potential Duplicate Match</h3>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.25rem' }}>
-              A participant with a matching name or phone number already exists in the central registry database.
+              A participant with a matching name or guardian mobile number already exists. Siblings share a guardian number, so check the name before deciding.
             </p>
           </div>
         </div>
@@ -385,7 +387,7 @@ export default function Registration({ setView, selectedEventId }) {
               <div>
                 <h4 style={{ fontSize: '0.95rem', fontWeight: 600 }}>{dup.name}</h4>
                 <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0.15rem 0 0 0' }}>
-                  Phone: {dup.phone} | Sabha: {dup.sabha}
+                  Guardian mobile: {dup.phone} | Sabha: {dup.sabha}
                 </p>
               </div>
               <button

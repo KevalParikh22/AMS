@@ -160,6 +160,23 @@ export function pushTable(storageKey, rows) {
   return pending[storageKey];
 }
 
+// Insert a single row, with no upsert and no prune.
+//
+// pushTable reconciles the WHOLE local array, which is wrong for an anonymous
+// public submission: RLS hides every existing participant from it, so its local
+// array is just the one new row, and a reconcile would try to upsert over an
+// existing id and prune everything else. A plain insert is exactly what the
+// participants_public_insert policy allows (status = 'pending').
+//
+// Deliberately not serialized through `pending` — an insert of a fresh row
+// cannot conflict with anything, and the caller awaits this to report failure.
+export async function insertRow(storageKey, row) {
+  const cfg = TABLE_MAP[storageKey];
+  if (!cfg || !supabase) return;
+  const { error } = await supabase.from(cfg.table).insert([cfg.toRow(row)]);
+  if (error) throw new Error(`${cfg.table} insert: ${error.message}`);
+}
+
 // Fetch a single table (used by realtime refresh).
 export async function fetchTable(storageKey) {
   const cfg = TABLE_MAP[storageKey];

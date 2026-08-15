@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { useDb } from '../context/DbContext';
+import { extractGuardianPhone, normalizePhone, participantKey } from '../lib/participantIdentity';
 import * as XLSX from 'xlsx';
 import {
   UploadCloud,
@@ -11,17 +12,22 @@ import {
   FileSpreadsheet
 } from 'lucide-react';
 
+// Balaks rarely have their own phone, so the guardian column carries the
+// contact number and is the required one. A sheet may still supply a separate
+// participant number; if mapped it wins, otherwise the number is read out of
+// the guardian text.
 const REQUIRED_FIELDS = {
   name: { label: 'Participant Name', required: true, synonyms: ['name', 'full name', 'balak name', 'candidate'] },
-  phone: { label: 'Phone Number', required: true, synonyms: ['phone', 'contact', 'mobile', 'cell', 'phone number'] },
+  guardianDetails: { label: 'Guardian Name & Contact', required: true, synonyms: ['guardian', 'parent', 'guardian contact details', 'father', 'mother'] },
   sabha: { label: 'Mandal / Sabha', required: false, synonyms: ['sabha', 'mandal', 'mandal-sabha', 'class', 'group'] },
   karyakar: { label: 'Karyakar Name', required: false, synonyms: ['karyakar', 'teacher', 'karyakar name', 'mentor'] },
-  guardianDetails: { label: 'Guardian Info', required: false, synonyms: ['guardian', 'parent', 'guardian contact details', 'father', 'mother'] }
+  phone: { label: 'Participant Phone (optional)', required: false, synonyms: ['phone', 'mobile', 'cell', 'phone number'] }
 };
 
-// Canonical five-column template from decision D2. The importer still allows
-// column mapping, so a real sheet's headers need not match these exactly.
-const SAMPLE_HEADERS = ['Name', 'Phone', 'Mandal-Sabha', 'Karyakar Name', 'Guardian Contact Details'];
+// Canonical roster template (decision D2, revised: the balak's own phone is no
+// longer collected). The importer still allows column mapping, so a real
+// sheet's headers need not match these exactly.
+const SAMPLE_HEADERS = ['Name', 'Mandal-Sabha', 'Karyakar Name', 'Guardian Contact Details'];
 
 export default function ExcelImport() {
   const { importExcelData, participants, sabhas, karyakars, addLookupEntries } = useDb();
@@ -42,40 +48,31 @@ export default function ExcelImport() {
   // Build a sample roster from the sabhas/karyakars actually configured here, so the
   // file doubles as a reference for which values this system will recognise.
   const handleDownloadSample = () => {
-    const rows = [];
-    karyakars.forEach((k, i) => {
-      rows.push({
-        'Name': `Sample Balak ${i + 1}`,
-        'Phone': `90000000${String(i + 1).padStart(2, '0')}`,
-        'Mandal-Sabha': k.sabha,
-        'Karyakar Name': k.name,
-        'Guardian Contact Details': `Guardian ${i + 1} - 91000000${String(i + 1).padStart(2, '0')}`
-      });
+    const sampleRow = (n, sabha, karyakarName) => ({
+      'Name': `Sample Balak ${n}`,
+      'Mandal-Sabha': sabha,
+      'Karyakar Name': karyakarName,
+      'Guardian Contact Details': `Guardian ${n} (Father) - 91000000${String(n).padStart(2, '0')}`
     });
+
+    const rows = karyakars.map((k, i) => sampleRow(i + 1, k.sabha, k.name));
 
     // Sabhas with no karyakar still get a row, showing the karyakar column is optional.
     sabhas
       .filter(s => !karyakars.some(k => k.sabha === s))
-      .forEach((s, i) => {
-        const n = karyakars.length + i + 1;
-        rows.push({
-          'Name': `Sample Balak ${n}`,
-          'Phone': `90000000${String(n).padStart(2, '0')}`,
-          'Mandal-Sabha': s,
-          'Karyakar Name': '',
-          'Guardian Contact Details': `Guardian ${n} - 91000000${String(n).padStart(2, '0')}`
-        });
-      });
+      .forEach((s, i) => rows.push(sampleRow(karyakars.length + i + 1, s, '')));
 
     if (rows.length === 0) {
-      rows.push({
-        'Name': 'Sample Balak 1',
-        'Phone': '9000000001',
-        'Mandal-Sabha': 'Bal Sabha - Sub-group A1',
-        'Karyakar Name': 'Karyakar Name',
-        'Guardian Contact Details': 'Guardian 1 - 9100000001'
-      });
+      rows.push(sampleRow(1, 'Bal Sabha - Sub-group A1', 'Karyakar Name'));
     }
+
+    // Siblings share one guardian number — shown explicitly so it's clear that
+    // is expected and both rows still import.
+    const first = rows[0];
+    rows.push({
+      ...first,
+      'Name': `${first['Name']} (sibling)`
+    });
 
     const ws = XLSX.utils.json_to_sheet(rows, { header: SAMPLE_HEADERS });
     const wb = XLSX.utils.book_new();
@@ -180,23 +177,29 @@ export default function ExcelImport() {
         }
       });
 
+      // Resolve the contact number the same way importExcelData will
+      const contactPhone = normalizePhone(parsedRow.phone) || extractGuardianPhone(parsedRow.guardianDetails);
+      parsedRow.contactPhone = contactPhone;
+      const rowKey = participantKey(parsedRow.name, contactPhone);
+
       // Determine what the importer will do with this row
       let status = 'new';
       let note = 'New participant';
       if (!parsedRow.name) {
         status = 'rejected';
         note = 'Missing name — row will be rejected';
-      } else if (!parsedRow.phone) {
+      } else if (!contactPhone) {
         status = 'review';
-        note = 'No phone (no unique ID) — will be created flagged for manual review';
-      } else if (seenPhones.has(parsedRow.phone)) {
+        note = 'No contact number in the guardian details — will be created flagged for manual review';
+      } else if (seenPhones.has(rowKey)) {
         status = 'duplicate';
-        note = `Duplicate phone within this file (${parsedRow.phone}) — row will be skipped`;
+        note = `Same name and guardian number already appear in this file (${contactPhone}) — row will be skipped`;
       } else {
-        seenPhones.add(parsedRow.phone);
-        const existing = participants.find(p => p.phone === parsedRow.phone && (p.status === 'approved' || p.status === 'pending'));
+        seenPhones.add(rowKey);
+        const existing = participants.find(p => participantKey(p.name, p.phone) === rowKey && (p.status === 'approved' || p.status === 'pending'));
         if (existing) {
           const isSame = (parsedRow.name || existing.name) === existing.name &&
+            (contactPhone || existing.phone) === existing.phone &&
             (parsedRow.sabha || existing.sabha) === existing.sabha &&
             (parsedRow.karyakar || existing.karyakar) === existing.karyakar &&
             (parsedRow.guardianDetails || existing.guardianDetails) === existing.guardianDetails;
@@ -288,7 +291,7 @@ export default function ExcelImport() {
         }
       });
       return parsedRow;
-    }).filter(row => row.name || row.phone); // Filter empty rows
+    }).filter(row => row.name || row.guardianDetails); // Filter empty rows
 
     if (dataToImport.length === 0) {
       setErrorMsg('No valid rows found to import.');
@@ -405,7 +408,7 @@ export default function ExcelImport() {
             <li>➕ New Added: <strong>{importSummary.inserted}</strong></li>
             <li>🔄 Existing Merged: <strong>{importSummary.updated}</strong></li>
             <li>➖ Unchanged: <strong>{importSummary.unchanged}</strong></li>
-            <li>👁️ Sent to Review (no phone): <strong>{importSummary.review}</strong></li>
+            <li>👁️ Sent to Review (no contact no.): <strong>{importSummary.review}</strong></li>
             <li>📑 Duplicate Rows Skipped: <strong>{importSummary.duplicates}</strong></li>
             <li>⚠️ Rejected: <strong>{importSummary.rejected}</strong></li>
           </ul>
@@ -505,7 +508,7 @@ export default function ExcelImport() {
               <span className="badge badge-success">New: {previewStats.new}</span>
               <span className="badge badge-info">Updates: {previewStats.update}</span>
               <span className="badge badge-info" style={{ opacity: 0.7 }}>Unchanged: {previewStats.unchanged}</span>
-              <span className="badge badge-warning">To Review (no phone): {previewStats.review}</span>
+              <span className="badge badge-warning">To Review (no contact no.): {previewStats.review}</span>
               <span className="badge badge-warning">Duplicates in file: {previewStats.duplicate}</span>
               <span className="badge badge-danger">Rejected: {previewStats.rejected}</span>
             </div>
@@ -587,7 +590,7 @@ export default function ExcelImport() {
                   <tr>
                     <th>Row</th>
                     <th>Name</th>
-                    <th>Phone</th>
+                    <th>Guardian Contact No.</th>
                     <th>Mandal-Sabha</th>
                     <th>Karyakar</th>
                     <th>Guardian Details</th>
@@ -599,7 +602,7 @@ export default function ExcelImport() {
                     <tr key={pRow.id}>
                       <td style={{ color: 'var(--text-muted)' }}>{pRow.id + 1}</td>
                       <td style={{ fontWeight: 600 }}>{pRow.data.name || <span style={{ color: 'var(--danger)' }}>Empty</span>}</td>
-                      <td>{pRow.data.phone || <span style={{ color: 'var(--danger)' }}>Empty</span>}</td>
+                      <td>{pRow.data.contactPhone || <span style={{ color: 'var(--danger)' }}>None found</span>}</td>
                       <td>{pRow.data.sabha || <span style={{ color: 'var(--text-muted)' }}>-</span>}</td>
                       <td>{pRow.data.karyakar || <span style={{ color: 'var(--text-muted)' }}>-</span>}</td>
                       <td style={{ fontSize: '0.8rem', maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
