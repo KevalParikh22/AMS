@@ -1,24 +1,34 @@
 import React, { useState } from 'react';
 import { useDb } from '../context/DbContext';
-import { 
-  Calendar, 
-  Plus, 
-  Check, 
-  Copy, 
-  Clock, 
-  Users, 
+import Modal from '../components/Modal';
+import QrCode from '../components/QrCode';
+import {
+  Calendar,
+  Plus,
+  Check,
+  Copy,
+  Clock,
+  Users,
   ShieldAlert,
   Play,
   Archive,
   Eye,
+  AlertTriangle,
+  Share2,
   RefreshCw
 } from 'lucide-react';
+
+// The public link is query-string routed, so it works from whatever path the
+// app is served at without any host rewrite rule.
+const buildShareUrl = (eventId) =>
+  `${window.location.origin}${window.location.pathname}?view=shared-registration&eventId=${eventId}`;
 
 export default function EventManagement() {
   const { events, addEvent, updateEvent, sabhas, getEffectiveStatus, isEventExpired } = useDb();
   
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [copiedEventId, setCopiedEventId] = useState(null);
+  const [shareEventId, setShareEventId] = useState(null);
 
   // Form States
   const [name, setName] = useState('');
@@ -52,11 +62,7 @@ export default function EventManagement() {
   };
 
   const handleCopyLink = (eventId) => {
-    // Generate public shared URL using query string routing for the client SPA
-    const baseUrl = window.location.origin + window.location.pathname;
-    const shareUrl = `${baseUrl}?view=shared-registration&eventId=${eventId}`;
-    
-    navigator.clipboard.writeText(shareUrl).then(() => {
+    navigator.clipboard.writeText(buildShareUrl(eventId)).then(() => {
       setCopiedEventId(eventId);
       setTimeout(() => setCopiedEventId(null), 2000);
     });
@@ -92,123 +98,104 @@ export default function EventManagement() {
       </div>
 
       {/* Modal Dialog for Event Creation */}
-      {showCreateModal && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.6)',
-          backdropFilter: 'blur(4px)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1000,
-          padding: '1rem'
-        }}>
-          <div className="card glass-panel" style={{
-            width: '100%',
-            maxWidth: '520px',
-            boxShadow: 'var(--shadow-lg)',
-            border: '1px solid var(--border-color)',
-            animation: 'fadeIn 0.2s ease-out'
-          }}>
-            <h3 style={{ fontSize: '1.25rem', marginBottom: '1.5rem', fontFamily: 'var(--font-display)' }}>Create Sabha Event</h3>
-            
-            <form onSubmit={handleCreateEvent} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              <div className="form-group">
-                <label className="form-label">Event Assembly Name</label>
-                <input 
-                  type="text" 
-                  className="form-control" 
-                  placeholder="e.g. Weekly Bal Sabha" 
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                />
-              </div>
+      <Modal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        maxWidth="520px"
+      >
+        <h3 style={{ fontSize: '1.25rem', marginBottom: '1.5rem', fontFamily: 'var(--font-display)' }}>Create Sabha Event</h3>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                <div className="form-group">
-                  <label className="form-label">Date</label>
-                  <input 
-                    type="date" 
-                    className="form-control" 
-                    value={date}
-                    onChange={(e) => setDate(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Sabha/Mandal Scope</label>
-                  <select 
-                    className="form-control" 
-                    value={sabhaScope} 
-                    onChange={(e) => setSabhaScope(e.target.value)}
-                  >
-                    <option value="All Sabhas">All Sabhas (Global)</option>
-                    {sabhas.map(s => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                <div className="form-group">
-                  <label className="form-label">Start Time</label>
-                  <input 
-                    type="time" 
-                    className="form-control" 
-                    value={startTime}
-                    onChange={(e) => setStartTime(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">End Time</label>
-                  <input 
-                    type="time" 
-                    className="form-control" 
-                    value={endTime}
-                    onChange={(e) => setEndTime(e.target.value)}
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Initial Status</label>
-                <select 
-                  className="form-control"
-                  value={status}
-                  onChange={(e) => setStatus(e.target.value)}
-                >
-                  <option value="Draft">Draft</option>
-                  <option value="Active">Active (Open for Attendance)</option>
-                </select>
-              </div>
-
-              <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end', marginTop: '1rem' }}>
-                <button 
-                  type="button" 
-                  className="btn btn-secondary" 
-                  onClick={() => setShowCreateModal(false)}
-                >
-                  Cancel
-                </button>
-                <button 
-                  type="submit" 
-                  className="btn btn-primary"
-                >
-                  Create Event
-                </button>
-              </div>
-            </form>
+        <form onSubmit={handleCreateEvent} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          <div className="form-group">
+            <label className="form-label">Event Assembly Name</label>
+            <input
+              type="text"
+              className="form-control"
+              placeholder="e.g. Weekly Bal Sabha"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+            />
           </div>
-        </div>
-      )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <div className="form-group">
+              <label className="form-label">Date</label>
+              <input
+                type="date"
+                className="form-control"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Sabha/Mandal Scope</label>
+              <select
+                className="form-control"
+                value={sabhaScope}
+                onChange={(e) => setSabhaScope(e.target.value)}
+              >
+                <option value="All Sabhas">All Sabhas (Global)</option>
+                {sabhas.map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <div className="form-group">
+              <label className="form-label">Start Time</label>
+              <input
+                type="time"
+                className="form-control"
+                value={startTime}
+                onChange={(e) => setStartTime(e.target.value)}
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">End Time</label>
+              <input
+                type="time"
+                className="form-control"
+                value={endTime}
+                onChange={(e) => setEndTime(e.target.value)}
+                required
+              />
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Initial Status</label>
+            <select
+              className="form-control"
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+            >
+              <option value="Draft">Draft</option>
+              <option value="Active">Active (Open for Attendance)</option>
+            </select>
+          </div>
+
+          <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end', marginTop: '1rem' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setShowCreateModal(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="btn btn-primary"
+            >
+              Create Event
+            </button>
+          </div>
+        </form>
+      </Modal>
 
       {/* Grid of Existing Events */}
       <div style={{
@@ -292,17 +279,17 @@ export default function EventManagement() {
 
                 {/* Shareable Pre-registration Link */}
                 <button
-                  onClick={() => handleCopyLink(event.id)}
+                  onClick={() => setShareEventId(event.id)}
                   className="btn btn-ghost"
                   style={{
                     padding: '0.45rem 0.75rem',
                     fontSize: '0.8rem',
-                    color: copiedEventId === event.id ? 'var(--success)' : 'var(--text-secondary)'
+                    color: 'var(--text-secondary)'
                   }}
                   disabled={isClosed}
                 >
-                  {copiedEventId === event.id ? <Check size={14} /> : <Copy size={14} />}
-                  <span>{copiedEventId === event.id ? 'Copied' : 'Pre-Reg Link'}</span>
+                  <Share2 size={14} />
+                  <span>Share Link</span>
                 </button>
               </div>
 
@@ -324,6 +311,83 @@ export default function EventManagement() {
           );
         })}
       </div>
+
+      {/* Public pre-registration link: visible URL + QR so a karyakar can show
+          it on a phone rather than only pasting from the clipboard */}
+      <Modal
+        open={Boolean(shareEventId)}
+        onClose={() => setShareEventId(null)}
+        maxWidth="440px"
+      >
+        {(() => {
+          const shareEvent = events.find(e => e.id === shareEventId);
+          if (!shareEvent) return null;
+          const shareUrl = buildShareUrl(shareEvent.id);
+          const shareIsDraft = getEffectiveStatus(shareEvent) === 'Draft';
+
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              <div>
+                <h3 style={{ fontSize: '1.25rem', fontFamily: 'var(--font-display)' }}>Public Registration Link</h3>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                  Anyone with this link can pre-register for <strong>{shareEvent.name}</strong>. Every
+                  submission lands in the review queue — nobody is added to the roster automatically.
+                </p>
+              </div>
+
+              {shareIsDraft && (
+                <div style={{
+                  display: 'flex',
+                  gap: '0.5rem',
+                  alignItems: 'flex-start',
+                  padding: '0.75rem',
+                  fontSize: '0.8rem',
+                  color: 'var(--warning)',
+                  backgroundColor: 'var(--warning-light)',
+                  border: '1px solid var(--warning)',
+                  borderRadius: 'var(--radius-sm)'
+                }}>
+                  <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: '0.1rem' }} />
+                  <span>
+                    This event is still a <strong>Draft</strong>. You can hand the link out now, but it
+                    won't accept submissions until you set the event to Active.
+                  </span>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'center' }}>
+                <QrCode value={shareUrl} size={180} />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">Link</label>
+                <input
+                  type="text"
+                  className="form-control"
+                  value={shareUrl}
+                  readOnly
+                  onFocus={(e) => e.target.select()}
+                  style={{ fontSize: '0.8rem' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.75rem' }}>
+                <button
+                  onClick={() => handleCopyLink(shareEvent.id)}
+                  className="btn btn-primary"
+                  style={{ flex: 1 }}
+                >
+                  {copiedEventId === shareEvent.id ? <Check size={14} /> : <Copy size={14} />}
+                  <span>{copiedEventId === shareEvent.id ? 'Copied' : 'Copy Link'}</span>
+                </button>
+                <button onClick={() => setShareEventId(null)} className="btn btn-secondary">
+                  Close
+                </button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
     </div>
   );
 }

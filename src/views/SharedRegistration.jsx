@@ -24,10 +24,16 @@ export default function SharedRegistration({ eventId }) {
   const [receipt, setReceipt] = useState(null);
   const [copiedReceipt, setCopiedReceipt] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   // Find the event; links auto-expire once the event end date/time passes (PRD FR-6)
   const event = events.find(e => e.id === eventId);
-  const isClosed = event ? getEffectiveStatus(event) === 'Closed' : false;
+  const effectiveStatus = event ? getEffectiveStatus(event) : 'Closed';
+  const isClosed = event ? effectiveStatus === 'Closed' : false;
+  // A Draft event's link can be handed out in advance, but it must not collect
+  // submissions until a coordinator activates the event.
+  const isNotOpenYet = event ? effectiveStatus === 'Draft' : false;
+  const acceptsSubmissions = Boolean(event) && !isClosed && !isNotOpenYet;
 
   // Set default sabha scope from event if possible
   React.useEffect(() => {
@@ -38,7 +44,7 @@ export default function SharedRegistration({ eventId }) {
     }
   }, [event, sabhas]);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setErrorMsg('');
 
@@ -50,8 +56,13 @@ export default function SharedRegistration({ eventId }) {
       setErrorMsg(t('shared.expiredError'));
       return;
     }
+    if (isNotOpenYet) {
+      setErrorMsg(t('shared.registrationNotOpenDesc'));
+      return;
+    }
 
     // Register participant with pendingReview set to true (needs review)
+    setSubmitting(true);
     try {
       const pendingP = registerNewParticipant({
         name,
@@ -62,6 +73,12 @@ export default function SharedRegistration({ eventId }) {
         pendingReview: true // Set to pending queue
       }, eventId); // Records the target event only — attendance is never marked from the public form
 
+      // Deliberate exception to "views never await data": in cloud mode the
+      // submission is only real once the row reaches Supabase, and showing a
+      // reference code for a registration that failed to save loses the person
+      // entirely. Absent in sandbox mode, where this stays synchronous.
+      if (pendingP.syncPromise) await pendingP.syncPromise;
+
       setReceipt({
         id: pendingP.id,
         name: pendingP.name,
@@ -71,7 +88,10 @@ export default function SharedRegistration({ eventId }) {
       });
     } catch (err) {
       console.error(err);
-      setErrorMsg('Could not submit registration. Please check inputs and try again.');
+      // Form values are left in place so the guardian can simply retry
+      setErrorMsg(t('shared.submitFailed'));
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -241,18 +261,20 @@ export default function SharedRegistration({ eventId }) {
               </div>
             </div>
 
-            {isClosed ? (
+            {!acceptsSubmissions ? (
               <div style={{
                 textAlign: 'center',
                 padding: '2rem 1rem',
-                color: 'var(--danger)',
-                backgroundColor: 'var(--danger-light)',
+                color: isNotOpenYet ? 'var(--warning)' : 'var(--danger)',
+                backgroundColor: isNotOpenYet ? 'var(--warning-light)' : 'var(--danger-light)',
                 borderRadius: 'var(--radius-md)'
               }}>
                 <AlertTriangle size={32} style={{ marginBottom: '0.5rem' }} />
-                <h4 style={{ fontWeight: 600 }}>{t('shared.registrationClosed')}</h4>
+                <h4 style={{ fontWeight: 600 }}>
+                  {isNotOpenYet ? t('shared.registrationNotOpen') : t('shared.registrationClosed')}
+                </h4>
                 <p style={{ fontSize: '0.8rem', marginTop: '0.25rem' }}>
-                  {t('shared.registrationClosedDesc')}
+                  {isNotOpenYet ? t('shared.registrationNotOpenDesc') : t('shared.registrationClosedDesc')}
                 </p>
               </div>
             ) : (
@@ -319,8 +341,9 @@ export default function SharedRegistration({ eventId }) {
                   type="submit"
                   className="btn btn-primary"
                   style={{ width: '100%', padding: '0.85rem', marginTop: '0.5rem' }}
+                  disabled={submitting}
                 >
-                  {t('shared.submit')}
+                  {submitting ? t('shared.submitting') : t('shared.submit')}
                 </button>
               </>
             )}

@@ -27,6 +27,7 @@ export default function AdminSettings() {
     uploadLocalSandbox,
     setSabhas,
     setKaryakars,
+    saveToStorage,
     addAuditLog
   } = useDb();
 
@@ -120,7 +121,7 @@ export default function AdminSettings() {
 
     const updated = [...sabhas, newSabha.trim()];
     setSabhas(updated);
-    localStorage.setItem('ams_sabhas', JSON.stringify(updated));
+    saveToStorage('ams_sabhas', updated);
     addAuditLog('Add Sabha Type', `Added new Sabha group: "${newSabha.trim()}"`);
     setNewSabha('');
   };
@@ -128,7 +129,7 @@ export default function AdminSettings() {
   const handleRemoveSabha = (name) => {
     const updated = sabhas.filter(s => s !== name);
     setSabhas(updated);
-    localStorage.setItem('ams_sabhas', JSON.stringify(updated));
+    saveToStorage('ams_sabhas', updated);
     addAuditLog('Remove Sabha Type', `Removed Sabha group: "${name}"`);
   };
 
@@ -141,7 +142,7 @@ export default function AdminSettings() {
     const sabhaAssignment = newKaryakarSabha || sabhas[0] || 'Unassigned';
     const updated = [...karyakars, { name, sabha: sabhaAssignment }];
     setKaryakars(updated);
-    localStorage.setItem('ams_karyakars', JSON.stringify(updated));
+    saveToStorage('ams_karyakars', updated);
     addAuditLog('Add Karyakar Profile', `Added new Karyakar: "${name}" mapped to sabha: "${sabhaAssignment}"`);
     setNewKaryakar('');
   };
@@ -149,7 +150,7 @@ export default function AdminSettings() {
   const handleRemoveKaryakar = (name) => {
     const updated = karyakars.filter(k => k.name !== name);
     setKaryakars(updated);
-    localStorage.setItem('ams_karyakars', JSON.stringify(updated));
+    saveToStorage('ams_karyakars', updated);
     addAuditLog('Remove Karyakar Profile', `Removed Karyakar: "${name}"`);
   };
 

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useDb } from '../context/DbContext';
 import { useAuth, ROLES } from '../context/AuthContext';
 import { useLang } from '../i18n/LanguageContext';
+import Modal from '../components/Modal';
 import {
   Search,
   Check,
@@ -70,64 +71,57 @@ function QrScannerModal({ onDetect, onClose, feedback, t }) {
   };
 
   return (
-    <div style={{
-      position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      zIndex: 1000, padding: '1rem'
-    }}>
-      <div className="card glass-panel" style={{ width: '100%', maxWidth: '440px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-          <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>{t('desk.scanTitle')}</h3>
-          <button onClick={onClose} className="btn btn-ghost" style={{ padding: '0.35rem' }}>
-            <X size={18} />
+    <Modal open onClose={onClose} maxWidth="440px">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>{t('desk.scanTitle')}</h3>
+        <button onClick={onClose} className="btn btn-ghost" style={{ padding: '0.35rem' }}>
+          <X size={18} />
+        </button>
+      </div>
+
+      {supported && !cameraError ? (
+        <>
+          <video
+            ref={videoRef}
+            muted
+            playsInline
+            style={{ width: '100%', borderRadius: 'var(--radius-md)', backgroundColor: '#000', aspectRatio: '4 / 3' }}
+          />
+          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textAlign: 'center', margin: '0.75rem 0' }}>
+            {t('desk.scanHint')}
+          </p>
+        </>
+      ) : (
+        <p style={{ fontSize: '0.85rem', color: 'var(--warning)', margin: '0.5rem 0 1rem' }}>
+          {cameraError || t('desk.scanNotSupported')}
+        </p>
+      )}
+
+      {feedback && (
+        <div
+          className={`badge ${feedback.ok ? 'badge-success' : 'badge-danger'}`}
+          style={{ display: 'block', textAlign: 'center', padding: '0.65rem', marginBottom: '0.75rem', borderRadius: 'var(--radius-sm)' }}
+        >
+          {feedback.message}
+        </div>
+      )}
+
+      <form onSubmit={handleManualSubmit}>
+        <label className="form-label" style={{ fontSize: '0.8rem' }}>{t('desk.scanManual')}</label>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <input
+            type="text"
+            className="form-control"
+            placeholder="P-101"
+            value={manualId}
+            onChange={(e) => setManualId(e.target.value)}
+          />
+          <button type="submit" className="btn btn-primary" style={{ whiteSpace: 'nowrap' }}>
+            {t('desk.scanMark')}
           </button>
         </div>
-
-        {supported && !cameraError ? (
-          <>
-            <video
-              ref={videoRef}
-              muted
-              playsInline
-              style={{ width: '100%', borderRadius: 'var(--radius-md)', backgroundColor: '#000', aspectRatio: '4 / 3' }}
-            />
-            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textAlign: 'center', margin: '0.75rem 0' }}>
-              {t('desk.scanHint')}
-            </p>
-          </>
-        ) : (
-          <p style={{ fontSize: '0.85rem', color: 'var(--warning)', margin: '0.5rem 0 1rem' }}>
-            {cameraError || t('desk.scanNotSupported')}
-          </p>
-        )}
-
-        {feedback && (
-          <div
-            className={`badge ${feedback.ok ? 'badge-success' : 'badge-danger'}`}
-            style={{ display: 'block', textAlign: 'center', padding: '0.65rem', marginBottom: '0.75rem', borderRadius: 'var(--radius-sm)' }}
-          >
-            {feedback.message}
-          </div>
-        )}
-
-        <form onSubmit={handleManualSubmit}>
-          <label className="form-label" style={{ fontSize: '0.8rem' }}>{t('desk.scanManual')}</label>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
-            <input
-              type="text"
-              className="form-control"
-              placeholder="P-101"
-              value={manualId}
-              onChange={(e) => setManualId(e.target.value)}
-            />
-            <button type="submit" className="btn btn-primary" style={{ whiteSpace: 'nowrap' }}>
-              {t('desk.scanMark')}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+      </form>
+    </Modal>
   );
 }
 

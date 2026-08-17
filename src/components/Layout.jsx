@@ -93,7 +93,7 @@ export default function Layout({ children, currentView, setView }) {
         display: 'flex',
         flexDirection: 'column',
         justifyContent: 'space-between',
-        zIndex: 100,
+        zIndex: 'var(--z-sidebar)',
         transition: 'var(--transition)'
       }}>
         <div>
