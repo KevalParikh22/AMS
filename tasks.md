@@ -9,9 +9,9 @@ Phase-wise task list derived from the [PRD](attendance-system-prd.md) and [BRD](
 Completed 2026-08-10 — decisions recorded in [phase-0-decisions.md](phase-0-decisions.md).
 
 - [x] Terminology and hierarchy confirmed: BRD glossary adopted; group stored as one combined "Mandal-Sabha" field (D1)
-- [x] Excel template confirmed: five columns; "Guardian Contact Details" = guardian's contact (D2)
-- [x] Identity/matching strategy: phone number is the unique key; no-phone records go to manual review (D3)
-- [x] Mandatory registration fields: Name + Phone + Sabha; karyakar and guardian optional (D6)
+- [x] Excel template confirmed (D2) — **later revised to four columns**: `Name`, `Mandal-Sabha`, `Karyakar Name`, `Guardian Contact Details`; the participant `Phone` column was dropped (see "Superseded by implementation" in phase-0-decisions.md)
+- [x] Identity/matching strategy (D3) — **later revised**: the key is name + guardian phone, not phone alone, because siblings share a guardian's number; records with no extractable number still go to manual review
+- [x] Mandatory registration fields (D6) — **later inverted**: Name + Guardian Contact Details are required; sabha is optional in the importer and defaults to `Unassociated`
 - [x] Roles/permissions boundaries confirmed as current defaults (D4)
 - [x] Public-link policy: public with mandatory review, no auto-approval; retention: keep until removal requested (D5, D7)
 - [x] Reporting requirements: present/absent list, new registrations list, sabha-wise attendance summary (D8)
@@ -23,14 +23,14 @@ Completed 2026-08-10 — decisions recorded in [phase-0-decisions.md](phase-0-de
 ### Done (prototype level)
 
 - [x] Login screen with role-based access (Admin, Coordinator, Attendance Volunteer, Registration Volunteer) and role-filtered navigation
-- [x] Excel/CSV import with column mapping, auto header matching, preview, and inserted/updated/rejected counts (upsert keyed on phone)
+- [x] Excel/CSV import with column mapping, auto header matching, preview, and inserted/updated/rejected counts (upsert keyed on name + guardian phone), a downloadable sample CSV, and warnings for sabha/karyakar values that are not configured
 - [x] Participant search with ranked exact/tolerant matching showing multiple candidates
 - [x] Event management: create/edit events with date, time, sabha scope, and Draft/Active/Closed status
 - [x] Mobile-friendly attendance desk with swipe-to-present interaction
 - [x] Duplicate attendance protection (one present record per participant per event) and undo/correction with audit entry
 - [x] Attendance records capture event, participant, status, timestamp, and acting user
 - [x] Internal new-participant registration; registration during an active event marks the person present
-- [x] Shared public registration link per event with reference code and pending-review queue; link rejects submissions once the event is Closed
+- [x] Shared public registration link with reference code and QR — **later revised**: the default link is permanent and targets whichever event is Active, and a submission creates an approved participant and marks them present immediately rather than queueing for review
 - [x] Reports with event/sabha filters, present/absent detail rows and totals, and Excel export (SheetJS)
 - [x] Pending-registration approval queue (approve / link to existing / reject)
 - [x] Audit log for imports, attendance actions, registrations, and admin changes
@@ -53,7 +53,7 @@ Completed 2026-08-10 — decisions recorded in [phase-0-decisions.md](phase-0-de
 
 - [x] **Backend / persistent database** — dual-mode data layer: with Supabase env vars configured the app loads from Postgres, writes through on every change (`src/lib/cloudSync.js`), caches locally for offline resilience, and refreshes via realtime subscriptions; without them it runs as the original localStorage sandbox. Schema + seed in `supabase/schema.sql`.
 - [x] **Real authentication** (cloud mode) — Supabase email/password login, forgot-password email flow with in-app password reset, roles/enabled flags in a `profiles` table auto-created per account; disabled profiles are signed out. Sandbox mode keeps mock logins.
-- [x] **Server-side permission enforcement** — row-level security policies mirror the D4 matrix independently of the UI (public form: insert-pending-only, no registry reads; imports/settings: Admin; corrections/reviews: Coordinator+).
+- [x] **Server-side permission enforcement** — row-level security policies mirror the D4 matrix independently of the UI (public form: insert-only, never registry reads, and only while an event is Active; roster reads require an *enabled* account; imports/settings: Admin; corrections/reviews: Coordinator+).
 - [x] **Audit immutability** — `audit_logs` has insert-only policies; nobody can update or delete rows server-side.
 - [x] **Sandbox → cloud migration** — pre-cloud data is snapshotted automatically and uploadable from Admin Control ("Upload sandbox data to cloud").
 - [x] Setup + Vercel deployment guide: `SETUP-BACKEND.md`
@@ -61,7 +61,7 @@ Completed 2026-08-10 — decisions recorded in [phase-0-decisions.md](phase-0-de
 ### Remaining (requires the user's Supabase/Vercel accounts)
 
 - [ ] Create the Supabase project, run `supabase/schema.sql`, create the admin account, and fill `.env.local` (steps 1–4 of SETUP-BACKEND.md)
-- [ ] Enable realtime replication on the six tables (step 6)
+- [x] Enable realtime replication on the six tables — now applied automatically by `supabase/schema.sql`, no dashboard step
 - [ ] Deploy to Vercel with the env vars and set the Supabase Site URL (step 7)
 - [ ] End-to-end cloud testing once credentials exist (login, sync between two devices, RLS denials, password reset)
 

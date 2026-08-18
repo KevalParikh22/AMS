@@ -60,3 +60,54 @@ A dedicated duplicate/exception report was **not** selected as a Phase 1 require
 - Expected volumes (records in the Excel file, users, events, participants per event) — needed before choosing backend/hosting in Phase 1 hardening.
 - Channels for sharing registration links (WhatsApp/SMS/etc.) — informational; messaging automation stays out of scope.
 - Multilingual needs — deferred to Phase 3.
+
+## Superseded by implementation
+
+Recorded 2026-08-18. The decisions below were made before the roster was seen in
+practice. Four of them no longer describe the system; the originals are left
+above unedited so the reasoning stays readable.
+
+The root cause for D2, D3 and D6 is the same: **balaks generally do not have a
+phone of their own.** A roster of children has no personal numbers, so a
+template requiring `Phone` and an identity rule keying on it would have routed
+essentially every row to manual review.
+
+- **D2 — Excel template.** Five columns became four: `Name`, `Mandal-Sabha`,
+  `Karyakar Name`, `Guardian Contact Details`. The `Phone` column is gone (a
+  participant phone column is still mappable if a sheet has one, but is
+  optional). Column mapping is unchanged.
+
+- **D3 — Identity and matching.** "Phone number is the unique participant key"
+  is replaced by **name + guardian phone**, where the number is extracted from
+  the free-text guardian column. Keying on the number alone was not viable:
+  siblings share a guardian, so it would have collapsed them into one record.
+  Rows with no extractable number still go to manual review, as before.
+
+- **D5 — Shared registration links.** All three clauses changed. The default
+  link is now permanent and carries no event id — it targets whichever event is
+  **Active** when a visitor opens it, so it cannot go stale, and it therefore
+  does not "expire" in the original sense; it simply shows a "no session open"
+  page. Submissions are no longer held for mandatory review: a submission
+  creates an approved participant and marks them **present immediately**. The
+  privacy clause still holds — the form never exposes existing participant data,
+  enforced server-side by RLS rather than by the UI.
+
+  Trade-off accepted knowingly: anyone with the link can add a name and mark it
+  present while a session is live. The mitigations are that the RLS window is
+  closed whenever no event is Active, and every such row is tagged
+  `markedBy: 'Public Self Check-in'` with an audit entry. It is also possible to
+  simply not distribute the link — with signed-in volunteers it is unused.
+
+- **D6 — Mandatory registration fields.** Inverted. **Name and guardian contact
+  details** are required; sabha is optional in the importer and defaults to
+  `Unassociated`. Guardian contact carries the only usable contact number, so it
+  could not remain optional.
+
+D1, D4 and D7–D9 are unchanged and still describe the system. D4 in particular
+is enforced server-side by row-level security in
+[supabase/schema.sql](supabase/schema.sql), not merely in the UI.
+
+One known limitation, recorded here because it follows from D5: the public form
+cannot detect that someone is already on the roster, because RLS deliberately
+hides the participant table from anonymous visitors. Duplicates created that way
+are reconciled afterwards with the merge tools in Reports.

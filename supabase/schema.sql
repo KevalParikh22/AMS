@@ -8,19 +8,38 @@
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   name text not null default '',
+  -- Email is mirrored here so an admin can tell accounts apart in the app:
+  -- auth.users is not readable from the client, so without this the user list
+  -- can only show a UUID.
+  email text not null default '',
   role text not null default 'Attendance Volunteer'
     check (role in ('Admin', 'Coordinator', 'Attendance Volunteer', 'Registration Volunteer')),
   enabled boolean not null default true,
   created_at timestamptz not null default now()
 );
 
--- Auto-create a profile when an auth user is created (default: volunteer).
--- Promote your first user to Admin manually — see SETUP-BACKEND.md.
+-- Backfill for projects created before the email column existed.
+alter table public.profiles add column if not exists email text not null default '';
+
+-- Auto-create a profile when an auth user is created.
+--
+-- New accounts are created DISABLED. Signing up is not the same as being let
+-- in: an admin activates the account in Admin Control, and that activation is
+-- the security boundary. This is what makes it safe to create volunteer logins
+-- from inside the app with the public anon key — and it also neutralises
+-- Supabase's default open email signup, where a stranger would otherwise land
+-- as an enabled Attendance Volunteer able to read the whole roster.
+-- Promote and enable your first admin manually — see SETUP-BACKEND.md.
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public as $$
 begin
-  insert into public.profiles (id, name)
-  values (new.id, coalesce(new.raw_user_meta_data->>'name', split_part(new.email, '@', 1)))
+  insert into public.profiles (id, name, email, enabled)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data->>'name', split_part(new.email, '@', 1)),
+    coalesce(new.email, ''),
+    false
+  )
   on conflict (id) do nothing;
   return new;
 end $$;
@@ -129,9 +148,11 @@ drop policy if exists sabhas_write on public.sabhas;
 create policy sabhas_write on public.sabhas
   for all using (public.has_permission('Admin')) with check (public.has_permission('Admin'));
 
--- Karyakars: signed-in read; Admin writes.
+-- Karyakars: read by any ENABLED account; Admin writes.
+-- my_role() returns NULL for a disabled or profile-less user, so these reads
+-- require an activated account rather than just a valid JWT.
 drop policy if exists karyakars_read on public.karyakars;
-create policy karyakars_read on public.karyakars for select using (auth.uid() is not null);
+create policy karyakars_read on public.karyakars for select using (public.my_role() is not null);
 drop policy if exists karyakars_write on public.karyakars;
 create policy karyakars_write on public.karyakars
   for all using (public.has_permission('Admin')) with check (public.has_permission('Admin'));
@@ -143,14 +164,25 @@ drop policy if exists events_write on public.events;
 create policy events_write on public.events
   for all using (public.has_permission('Coordinator')) with check (public.has_permission('Coordinator'));
 
--- Participants: signed-in read. The PUBLIC form may only INSERT pending rows —
--- it can never read the registry (BRD privacy rule). Registration Volunteer+
+-- Participants: read by any ENABLED account (never anonymous — this table holds
+-- guardian contact details). The PUBLIC form may INSERT but never read the
+-- registry (BRD privacy rule): pending rows any time, or approved rows only
+-- while some event is Active (self check-in). Registration Volunteer+
 -- inserts approved rows; edits are Coordinator+.
 drop policy if exists participants_read on public.participants;
-create policy participants_read on public.participants for select using (auth.uid() is not null);
+create policy participants_read on public.participants for select using (public.my_role() is not null);
 drop policy if exists participants_public_insert on public.participants;
 create policy participants_public_insert on public.participants
-  for insert with check (status = 'pending' or public.has_permission('Registration Volunteer'));
+  for insert with check (
+    public.has_permission('Registration Volunteer')
+    or status = 'pending'
+    -- Public self check-in from the shared link. Only permitted while some
+    -- event is actually Active, which time-boxes the window in which an
+    -- anonymous visitor can create roster rows.
+    or (status = 'approved' and exists (
+      select 1 from public.events e where e.status = 'Active'
+    ))
+  );
 drop policy if exists participants_update on public.participants;
 create policy participants_update on public.participants
   for update using (public.has_permission('Coordinator'));
@@ -158,13 +190,22 @@ drop policy if exists participants_delete on public.participants;
 create policy participants_delete on public.participants
   for delete using (public.has_permission('Admin'));
 
--- Attendance: signed-in read + insert (any volunteer marks present);
+-- Attendance: enabled-account read + signed-in insert (any volunteer marks present);
 -- corrections (delete) are Coordinator+; rows are never updated.
 drop policy if exists attendance_read on public.attendance;
-create policy attendance_read on public.attendance for select using (auth.uid() is not null);
+create policy attendance_read on public.attendance for select using (public.my_role() is not null);
 drop policy if exists attendance_insert on public.attendance;
 create policy attendance_insert on public.attendance
-  for insert with check (auth.uid() is not null);
+  for insert with check (
+    -- my_role(), not auth.uid(): a disabled or not-yet-activated account still
+    -- holds a valid JWT, and must not be able to write attendance.
+    public.my_role() is not null
+    -- Public self check-in may only mark presence against an Active event,
+    -- never a draft, closed, or arbitrary past one.
+    or exists (
+      select 1 from public.events e where e.id = event_id and e.status = 'Active'
+    )
+  );
 drop policy if exists attendance_delete on public.attendance;
 create policy attendance_delete on public.attendance
   for delete using (public.has_permission('Coordinator'));
@@ -195,3 +236,24 @@ insert into public.karyakars (name, sabha) values
   ('Yogi Joshi', 'Kishore Mandal - West Wing'),
   ('Nilkanth Sharma', 'Yuva Mandal - Youth')
 on conflict (name) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- Realtime
+-- ---------------------------------------------------------------------------
+-- Multi-device live sync needs these tables in the supabase_realtime
+-- publication. This used to be a manual dashboard step (SETUP-BACKEND.md §7);
+-- skipping it meant subscribeToChanges silently never fired and other devices
+-- only saw changes on reload. Guarded so re-running the schema is safe.
+do $$
+declare t text;
+begin
+  foreach t in array array['participants','events','attendance','sabhas','karyakars','audit_logs']
+  loop
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t
+    ) then
+      execute format('alter publication supabase_realtime add table public.%I', t);
+    end if;
+  end loop;
+end $$;

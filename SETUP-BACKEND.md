@@ -19,20 +19,42 @@ Cloud mode turns on automatically when the two environment variables below are p
 2. Paste the entire contents of [`supabase/schema.sql`](supabase/schema.sql) and click **Run**.
 3. You should see "Success". This creates all tables, the role-based security policies, and seeds the default sabha/karyakar lists. The script is safe to re-run.
 
-## 3. Create your admin account
+## 3. Authentication settings
+
+Dashboard → **Authentication → Providers → Email**:
+
+- **Turn OFF "Confirm email".** The app creates volunteer logins directly, and an unconfirmed account cannot sign in.
+- **Turn OFF "Allow new users to sign up".** Defence in depth — the schema already creates every new account *disabled*, so a stranger who signs up gets nothing, but there is no reason to leave the door open.
+
+## 4. Create your admin account
+
+This is the only account you create by hand; every other user is added from inside the app.
 
 1. Dashboard → **Authentication → Users → Add user → Create new user**.
    Enter your email and a password; check **Auto Confirm User**.
-2. Every new account starts as *Attendance Volunteer*. Promote yourself to Admin — open **SQL Editor** and run:
+2. New accounts start as a *disabled* Attendance Volunteer. Promote **and enable** yourself — open **SQL Editor** and run:
 
    ```sql
-   update public.profiles set role = 'Admin'
+   update public.profiles set role = 'Admin', enabled = true
    where id = (select id from auth.users where email = 'YOUR-EMAIL-HERE');
    ```
 
-3. Add more users the same way (volunteers, coordinators). Once you can log into the app as Admin, you assign *their* roles from **Admin Control** in the app — no SQL needed.
+3. Sign into the app as Admin. From now on, add volunteers in **Admin Control → User Accounts & Roles**: enter their name, email, and an initial password, pick a role, and they can sign in immediately on their own phone. No dashboard, no SQL.
 
-## 4. Connect the app
+### Which role to give a volunteer
+
+| Role | Mark attendance | Register walk-ins | Undo / approve | Events, Reports | Admin Control |
+|---|:--:|:--:|:--:|:--:|:--:|
+| **Registration Volunteer** ← use this | ✓ | ✓ | — | — | — |
+| Attendance Volunteer | ✓ | — | — | — | — |
+| Coordinator | ✓ | ✓ | ✓ | ✓ | — |
+| Admin | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+**Registration Volunteer** is the right tier for a typical event volunteer: marking attendance is the base level every signed-in user has, so this role covers both everyday jobs while corrections and approvals stay with you.
+
+To remove someone's access after the event, hit **Disable** — they are signed out on their next page load, and the server stops answering them regardless of any session they still hold.
+
+## 5. Connect the app
 
 1. Dashboard → **Project Settings → API**. Copy the **Project URL** and the **anon public** key.
 2. In the project folder, copy `.env.example` to `.env.local` and paste both values.
@@ -40,15 +62,17 @@ Cloud mode turns on automatically when the two environment variables below are p
 
 > The anon key is safe to ship in the frontend — it only grants what the row-level-security policies allow.
 
-## 5. Migrate your sandbox data (optional, one time)
+## 6. Migrate your sandbox data (optional, one time)
 
 If you used the app in sandbox mode before connecting the cloud, the app snapshots that data automatically on first cloud start. To move it into Supabase: log in as Admin → **Admin Control** → **Upload sandbox data to cloud**.
 
-## 6. Enable realtime sync (multi-device)
+## 7. Realtime sync (multi-device)
 
-Dashboard → **Database → Replication** → under `supabase_realtime`, enable the tables: `participants`, `events`, `attendance`, `sabhas`, `karyakars`, `audit_logs`. (If you skip this, everything still works — other devices just refresh data on reload instead of live.)
+**Nothing to do — `schema.sql` now adds all six tables to the `supabase_realtime` publication for you.** This used to be a manual step that was easy to miss, and skipping it silently disabled live sync.
 
-## 7. Deploy the frontend to Vercel
+To confirm, Dashboard → **Database → Replication** should list `participants`, `events`, `attendance`, `sabhas`, `karyakars`, and `audit_logs` under `supabase_realtime`.
+
+## 8. Deploy the frontend to Vercel
 
 1. Go to [vercel.com](https://vercel.com) → sign up with your GitHub account → **Add New → Project** → import `KevalParikh22/AMS`.
 2. Framework preset: **Vite** (auto-detected). Build command `npm run build`, output `dist` (defaults).
@@ -60,11 +84,33 @@ Dashboard → **Database → Replication** → under `supabase_realtime`, enable
 
 - The React app keeps all data in memory (source of truth for the UI) and mirrors every change to browser storage *and* Supabase (write-through). If the network drops mid-event, the app keeps working from the local cache and shows an `error`/`offline` badge in Admin Control; data written while offline lives locally until the next successful save of that table.
 - Other devices' changes arrive via Supabase realtime and refresh the affected table.
-- Server-side, RLS policies enforce the role matrix from [phase-0-decisions.md](phase-0-decisions.md) (D4) independently of the UI: the public form can only *insert pending registrations* and can never read the registry; audit logs are append-only for everyone.
+- Server-side, RLS policies enforce the role matrix from [phase-0-decisions.md](phase-0-decisions.md) (D4) independently of the UI: the public form can only *insert* and can never read the registry; roster reads require an **enabled** account, so a disabled or self-signed-up user sees nothing; audit logs are append-only for everyone.
+
+## Upgrading an existing project
+
+Re-running [`supabase/schema.sql`](supabase/schema.sql) is how you apply updates. **Do not drop any tables first** — the script is written to upgrade in place (`create table if not exists`, `create or replace function`, `drop policy if exists` + recreate, `add column if not exists`, `on conflict do nothing`). It contains no `drop table`, `truncate`, or `delete`.
+
+This was tested by seeding a database with the previous schema and running the current one over it: participant, event, attendance, audit, sabha and karyakar row counts were all preserved, and existing profiles kept their role and `enabled` flag — so **re-running will not lock out your admin**.
+
+### One-time: backfill emails on pre-existing accounts
+
+Accounts created before `profiles.email` existed have a blank email, so Admin Control shows a truncated UUID (`#a1b2c3d4`) instead of a person. `auth.users` is not readable from the browser, so copy the addresses across once in the **SQL Editor**:
+
+```sql
+update public.profiles p
+set email = u.email
+from auth.users u
+where u.id = p.id and p.email = '';
+```
+
+Purely cosmetic — nothing depends on it, and volunteers added through the app get their email automatically. Safe to re-run.
 
 ## Troubleshooting
 
 - **Login says "Invalid login credentials"** — the user doesn't exist or the password is wrong; check Authentication → Users.
-- **Login works but the app signs you straight out** — your profile is disabled, or the `profiles` row is missing (re-run the schema; the trigger creates profiles for new users only, so for pre-existing users insert a row manually).
-- **Changes don't appear on other devices until reload** — enable realtime replication (step 6).
+- **Login works but the app signs you straight out** — your profile is disabled (new accounts start disabled by design — enable it from Admin Control), or the `profiles` row is missing (re-run the schema; the trigger creates profiles for new users only, so for pre-existing users insert a row manually).
+- **User list shows `#a1b2c3d4` instead of names/emails** — pre-existing accounts have a blank email; run the backfill query under *Upgrading an existing project*.
+- **Changes don't appear on other devices until reload** — re-run `schema.sql`; it registers the tables for realtime (step 7).
+- **"An account with that email already exists" when adding a volunteer** — the auth user exists but its profile may be disabled; find them in the list below the form and hit **Enable**.
+- **A new volunteer can't sign in** — "Confirm email" is still on in Authentication → Providers → Email (step 3), so their account is unconfirmed.
 - **"Cloud sync failed" badge** — check the browser console; usually RLS denying a write because the logged-in user's role doesn't permit it.

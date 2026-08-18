@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth, ROLES } from './AuthContext';
 import { isCloudMode } from '../lib/supabase';
-import { fetchAllTables, fetchTable, pushTable, insertRow, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
+import { fetchAllTables, fetchTable, pushTable, insertRow, deleteRow, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
+import { uniqueId } from '../lib/ids';
 import { extractGuardianPhone, normalizePhone, participantKey } from '../lib/participantIdentity';
 
 const DbContext = createContext();
@@ -161,19 +162,6 @@ const nextSeqId = (prefix, counterKey, list) => {
   const next = Math.max(stored, maxExisting) + 1;
   localStorage.setItem(counterKey, String(next));
   return prefix + next;
-};
-
-// Id for an anonymous public submission. It cannot use nextSeqId: RLS hides
-// every existing participant from an unauthenticated visitor, so the counter
-// would restart at P-101 and collide with a real record. Timestamp keeps ids
-// roughly ordered; the random half carries the uniqueness. A timestamp plus
-// only a few random chars is NOT enough — ids minted in the same millisecond
-// collide measurably (~8 per 20k draws with 4 random chars).
-const publicSubmissionId = () => {
-  const random = globalThis.crypto?.randomUUID
-    ? globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 12)
-    : `${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 8)}`;
-  return `PUB-${Date.now().toString(36)}${random}`;
 };
 
 // Migrate legacy participant records (pendingReview flags, "[REJECTED]" name
@@ -355,6 +343,18 @@ export const DbProvider = ({ children }) => {
     });
     return unsubscribe;
   }, []);
+
+  // Pull the authoritative copy of one table after a rejected write, so the
+  // device stops showing a row the server never accepted.
+  const refreshFromCloud = (key, setter) => {
+    if (!isCloudMode) return;
+    fetchTable(key)
+      .then(rows => {
+        setter(rows);
+        localStorage.setItem(key, JSON.stringify(rows));
+      })
+      .catch(err => console.error('Refresh after failed write:', err));
+  };
 
   // Persist locally (cache) and write through to the cloud when configured
   const saveToStorage = (key, data) => {
@@ -665,7 +665,9 @@ export const DbProvider = ({ children }) => {
     }
 
     const newAttendance = {
-      id: 'A-' + Date.now(),
+      // Collision-resistant: 'A-' + Date.now() gave two volunteers marking in
+      // the same millisecond the same id, so one overwrote the other.
+      id: uniqueId('A-'),
       eventId,
       participantId,
       status: 'Present',
@@ -675,7 +677,31 @@ export const DbProvider = ({ children }) => {
 
     const updatedAttendance = [...attendance, newAttendance];
     setAttendance(updatedAttendance);
-    saveToStorage('ams_attendance', updatedAttendance);
+
+    let syncPromise;
+    if (isCloudMode) {
+      // Insert just this row. saveToStorage would reconcile the WHOLE table and
+      // prune every row missing from this device's copy — which silently
+      // deletes marks made by other volunteers in the last few seconds.
+      localStorage.setItem('ams_attendance', JSON.stringify(updatedAttendance));
+      syncPromise = insertRow('ams_attendance', newAttendance)
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          // The (event_id, participant_id) unique constraint is the real
+          // arbiter between devices: losing that race means someone else
+          // already marked this person. Drop the optimistic row either way.
+          setAttendance(prev => prev.filter(a => a.id !== newAttendance.id));
+          setCloudStatus('error');
+          refreshFromCloud('ams_attendance', setAttendance);
+          throw new Error(
+            /duplicate key|unique constraint/i.test(err.message)
+              ? 'Already marked present by another volunteer.'
+              : 'Could not save attendance — check the connection and try again.'
+          );
+        });
+    } else {
+      saveToStorage('ams_attendance', updatedAttendance);
+    }
 
     const participant = participants.find(p => p.id === participantId);
     addAuditLog(
@@ -683,7 +709,7 @@ export const DbProvider = ({ children }) => {
       `Marked present: ${participant ? participant.name : 'Unknown'} (${participantId}) for Event: ${event.name} (${eventId})`
     );
 
-    return { success: true, attendance: newAttendance };
+    return { success: true, attendance: newAttendance, syncPromise };
   };
 
   // Attendance corrections are Coordinator+ (decision D4)
@@ -706,7 +732,21 @@ export const DbProvider = ({ children }) => {
     const updated = attendance.filter((_, idx) => idx !== targetIdx);
     
     setAttendance(updated);
-    saveToStorage('ams_attendance', updated);
+
+    if (isCloudMode) {
+      // Delete just this row, for the same reason markPresent inserts just one:
+      // a full-table reconcile would prune concurrent volunteers' marks.
+      localStorage.setItem('ams_attendance', JSON.stringify(updated));
+      deleteRow('ams_attendance', record.id)
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Undo attendance failed:', err);
+          setCloudStatus('error');
+          refreshFromCloud('ams_attendance', setAttendance);
+        });
+    } else {
+      saveToStorage('ams_attendance', updated);
+    }
 
     const participant = participants.find(p => p.id === participantId);
     addAuditLog(
@@ -734,7 +774,7 @@ export const DbProvider = ({ children }) => {
     // local list is empty and nextSeqId would restart at P-101 and collide with
     // a real record. Public submissions get an id that needs no prior reads.
     const newId = isPublicSubmission
-      ? publicSubmissionId()
+      ? uniqueId('PUB-')
       : nextSeqId('P-', 'ams_seq_participant', participants);
     const newP = {
       id: newId,
@@ -774,6 +814,85 @@ export const DbProvider = ({ children }) => {
     );
 
     return newP;
+  };
+
+  // The event a shared link should target: whichever is Active right now.
+  const getCurrentPublicEvent = () => events.find(e => getEffectiveStatus(e) === 'Active') || null;
+
+  // Public self check-in from the shared link.
+  //
+  // Distinct from registerNewParticipant + markPresent because there is no
+  // signed-in user: markPresent requires one, and the roster in Reports only
+  // counts status === 'approved', so a 'pending' row would never show up in
+  // the present list. The event is resolved server-side-of-the-truth here —
+  // whichever event is Active right now — so one permanent link always lands
+  // on today's session instead of a stale event id.
+  //
+  // Note: RLS hides the participant table from anonymous visitors, so this
+  // cannot check whether the person is already on the roster. Duplicates are
+  // reconciled afterwards with the merge tools in Reports.
+  const publicSelfCheckIn = (formData) => {
+    const event = getCurrentPublicEvent();
+    if (!event) {
+      return { error: 'No session is open for check-in right now.' };
+    }
+
+    const guardianDetails = String(formData.guardianDetails || '').trim();
+    const phone = normalizePhone(formData.phone) || extractGuardianPhone(guardianDetails);
+
+    const newP = {
+      id: uniqueId('PUB-'),
+      name: String(formData.name || '').trim(),
+      phone,
+      sabha: formData.sabha || event.sabhaMandalScope || 'Unassociated',
+      karyakar: 'None Assigned', // assigned by a coordinator later
+      guardianDetails,
+      createdAt: new Date().toISOString(),
+      registeredForEventId: event.id,
+      isNewRegistration: true,
+      status: 'approved'
+    };
+
+    const record = {
+      id: uniqueId('A-'),
+      eventId: event.id,
+      participantId: newP.id,
+      status: 'Present',
+      markedAt: new Date().toISOString(),
+      markedBy: 'Public Self Check-in'
+    };
+
+    const nextParticipants = [...participants, newP];
+    const nextAttendance = [...attendance, record];
+    setParticipants(nextParticipants);
+    setAttendance(nextAttendance);
+
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_participants', JSON.stringify(nextParticipants));
+      localStorage.setItem('ams_attendance', JSON.stringify(nextAttendance));
+      // Row-level inserts, never a full-table reconcile: an anonymous device
+      // cannot read the other rows and would prune them.
+      syncPromise = insertRow('ams_participants', newP)
+        .then(() => insertRow('ams_attendance', record))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          setParticipants(prev => prev.filter(p => p.id !== newP.id));
+          setAttendance(prev => prev.filter(a => a.id !== record.id));
+          setCloudStatus('error');
+          throw err;
+        });
+    } else {
+      saveToStorage('ams_participants', nextParticipants);
+      saveToStorage('ams_attendance', nextAttendance);
+    }
+
+    addAuditLog(
+      'Public Self Check-in',
+      `${newP.name} (${newP.id}) checked in via the shared link and was marked present for ${event.name} (${event.id}).`
+    );
+
+    return { participant: newP, event, attendance: record, syncPromise };
   };
 
   // Administrative Participant Update (Coordinator+, per decision D4)
@@ -962,6 +1081,8 @@ export const DbProvider = ({ children }) => {
       markPresent,
       undoAttendance,
       registerNewParticipant,
+      publicSelfCheckIn,
+      getCurrentPublicEvent,
       updateParticipant,
       approveParticipant,
       rejectParticipant,
