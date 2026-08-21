@@ -8,12 +8,11 @@ import {
   Copy,
   Calendar,
   Clock,
-  MapPin,
   Check
 } from 'lucide-react';
 
 export default function SharedRegistration({ eventId }) {
-  const { events, sabhas, registerNewParticipant, getEffectiveStatus } = useDb();
+  const { events, sabhas, publicSelfCheckIn, getCurrentPublicEvent, getEffectiveStatus } = useDb();
   const { t } = useLang();
 
   const [name, setName] = useState('');
@@ -26,14 +25,17 @@ export default function SharedRegistration({ eventId }) {
   const [errorMsg, setErrorMsg] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  // Find the event; links auto-expire once the event end date/time passes (PRD FR-6)
-  const event = events.find(e => e.id === eventId);
-  const effectiveStatus = event ? getEffectiveStatus(event) : 'Closed';
-  const isClosed = event ? effectiveStatus === 'Closed' : false;
-  // A Draft event's link can be handed out in advance, but it must not collect
-  // submissions until a coordinator activates the event.
-  const isNotOpenYet = event ? effectiveStatus === 'Draft' : false;
-  const acceptsSubmissions = Boolean(event) && !isClosed && !isNotOpenYet;
+  // Resolve which event this link targets. An explicit eventId still wins while
+  // that event is live, so previously shared per-event links keep working; once
+  // it is over (or the link never named one) fall through to whichever event is
+  // Active now, so a permanent link never lands on a stale event.
+  const namedEvent = eventId ? events.find(e => e.id === eventId) : null;
+  const namedIsLive = namedEvent && getEffectiveStatus(namedEvent) === 'Active';
+  const event = namedIsLive ? namedEvent : getCurrentPublicEvent();
+
+  // A link that named an event which has since ended is not broken — it just
+  // has no session to check into right now.
+  const hadNamedEvent = Boolean(namedEvent);
 
   // Set default sabha scope from event if possible
   React.useEffect(() => {
@@ -49,41 +51,31 @@ export default function SharedRegistration({ eventId }) {
     setErrorMsg('');
 
     if (!event) {
-      setErrorMsg(t('shared.invalidLinkDesc'));
-      return;
-    }
-    if (isClosed) {
-      setErrorMsg(t('shared.expiredError'));
-      return;
-    }
-    if (isNotOpenYet) {
-      setErrorMsg(t('shared.registrationNotOpenDesc'));
+      setErrorMsg(t('shared.noSessionDesc'));
       return;
     }
 
-    // Register participant with pendingReview set to true (needs review)
     setSubmitting(true);
     try {
-      const pendingP = registerNewParticipant({
-        name,
-        phone,
-        sabha,
-        karyakar: 'None Assigned', // Assigned during coordinator review
-        guardianDetails,
-        pendingReview: true // Set to pending queue
-      }, eventId); // Records the target event only — attendance is never marked from the public form
+      // Creates the person AND marks them present for the live event in one go
+      const result = publicSelfCheckIn({ name, phone, sabha, guardianDetails });
+      if (result.error) {
+        setErrorMsg(result.error);
+        return;
+      }
 
       // Deliberate exception to "views never await data": in cloud mode the
-      // submission is only real once the row reaches Supabase, and showing a
-      // reference code for a registration that failed to save loses the person
+      // check-in is only real once the rows reach Supabase, and showing a
+      // reference code for something that failed to save loses the person
       // entirely. Absent in sandbox mode, where this stays synchronous.
-      if (pendingP.syncPromise) await pendingP.syncPromise;
+      if (result.syncPromise) await result.syncPromise;
 
       setReceipt({
-        id: pendingP.id,
-        name: pendingP.name,
-        phone: pendingP.phone,
-        sabha: pendingP.sabha,
+        id: result.participant.id,
+        name: result.participant.name,
+        phone: result.participant.phone,
+        sabha: result.participant.sabha,
+        eventName: result.event.name,
         refNumber: 'REG-' + Date.now().toString().slice(-6).toUpperCase()
       });
     } catch (err) {
@@ -117,9 +109,9 @@ export default function SharedRegistration({ eventId }) {
       }}>
         <div className="card glass-panel" style={{ maxWidth: '480px', textAlign: 'center', padding: '3rem 2rem' }}>
           <AlertTriangle size={48} color="var(--danger)" style={{ marginBottom: '1rem' }} />
-          <h3 style={{ fontSize: '1.5rem', fontWeight: 700, fontFamily: 'var(--font-display)' }}>{t('shared.invalidLinkTitle')}</h3>
+          <h3 style={{ fontSize: '1.5rem', fontWeight: 700, fontFamily: 'var(--font-display)' }}>{t('shared.noSessionTitle')}</h3>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginTop: '0.5rem' }}>
-            {t('shared.invalidLinkDesc')}
+            {hadNamedEvent ? t('shared.sessionEndedDesc') : t('shared.noSessionDesc')}
           </p>
         </div>
       </div>
@@ -261,24 +253,6 @@ export default function SharedRegistration({ eventId }) {
               </div>
             </div>
 
-            {!acceptsSubmissions ? (
-              <div style={{
-                textAlign: 'center',
-                padding: '2rem 1rem',
-                color: isNotOpenYet ? 'var(--warning)' : 'var(--danger)',
-                backgroundColor: isNotOpenYet ? 'var(--warning-light)' : 'var(--danger-light)',
-                borderRadius: 'var(--radius-md)'
-              }}>
-                <AlertTriangle size={32} style={{ marginBottom: '0.5rem' }} />
-                <h4 style={{ fontWeight: 600 }}>
-                  {isNotOpenYet ? t('shared.registrationNotOpen') : t('shared.registrationClosed')}
-                </h4>
-                <p style={{ fontSize: '0.8rem', marginTop: '0.25rem' }}>
-                  {isNotOpenYet ? t('shared.registrationNotOpenDesc') : t('shared.registrationClosedDesc')}
-                </p>
-              </div>
-            ) : (
-              <>
                 <div className="form-group">
                   <label className="form-label">{t('shared.fullName')}</label>
                   <input
@@ -345,8 +319,6 @@ export default function SharedRegistration({ eventId }) {
                 >
                   {submitting ? t('shared.submitting') : t('shared.submit')}
                 </button>
-              </>
-            )}
           </form>
         )}
       </div>

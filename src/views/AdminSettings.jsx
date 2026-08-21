@@ -31,7 +31,7 @@ export default function AdminSettings() {
     addAuditLog
   } = useDb();
 
-  const { user, users, addManagedUser, setManagedUserEnabled, setManagedUserRole } = useAuth();
+  const { user, users, addManagedUser, addCloudUser, setManagedUserEnabled, setManagedUserRole } = useAuth();
 
   // Lookup Entry Forms
   const [newSabha, setNewSabha] = useState('');
@@ -41,7 +41,12 @@ export default function AdminSettings() {
   // User management form
   const [newUserName, setNewUserName] = useState('');
   const [newUserUsername, setNewUserUsername] = useState('');
-  const [newUserRole, setNewUserRole] = useState(ROLES.ATTENDANCE_VOLUNTEER);
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [addingUser, setAddingUser] = useState(false);
+  // Registration Volunteer is the tier a typical event volunteer needs: it
+  // covers marking attendance (base level) AND registering walk-ins, without
+  // granting undo, approvals, Events, or Reports.
+  const [newUserRole, setNewUserRole] = useState(ROLES.REGISTRATION_VOLUNTEER);
   const [userMsg, setUserMsg] = useState('');
 
   // Audit log filters
@@ -51,18 +56,29 @@ export default function AdminSettings() {
   // Status Messages
   const [dbSuccess, setDbSuccess] = useState('');
 
-  const handleAddUser = (e) => {
+  const handleAddUser = async (e) => {
     e.preventDefault();
-    const result = addManagedUser(newUserName, newUserUsername, newUserRole);
-    if (result.success) {
-      addAuditLog('User Account Created', `Created user "${newUserName}" (@${result.username}) with role: ${newUserRole}.`);
-      setUserMsg(`User @${result.username} created.`);
-      setNewUserName('');
-      setNewUserUsername('');
-    } else {
-      setUserMsg(result.message);
+    setAddingUser(true);
+    try {
+      // Cloud mode creates a real Supabase login; sandbox mode only adds a
+      // local role entry (there are no passwords there).
+      const result = isCloudMode
+        ? await addCloudUser(newUserName, newUserUsername, newUserPassword, newUserRole)
+        : addManagedUser(newUserName, newUserUsername, newUserRole);
+
+      if (result.success) {
+        addAuditLog('User Account Created', `Created user "${newUserName}" (${result.username}) with role: ${newUserRole}.`);
+        setUserMsg(`${newUserName} can now sign in as ${result.username}.`);
+        setNewUserName('');
+        setNewUserUsername('');
+        setNewUserPassword('');
+      } else {
+        setUserMsg(result.message);
+      }
+    } finally {
+      setAddingUser(false);
+      setTimeout(() => setUserMsg(''), 6000);
     }
-    setTimeout(() => setUserMsg(''), 3500);
   };
 
   const handleToggleUser = (u) => {
@@ -336,7 +352,7 @@ export default function AdminSettings() {
         </h3>
         <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
           {isCloudMode
-            ? 'Accounts are created in the Supabase dashboard (Authentication → Users). New accounts start as Attendance Volunteer — assign their real role and enable/disable access here.'
+            ? 'Add a volunteer here and they can sign in immediately on their own phone. Accounts created any other way (including self-signup) stay disabled until you enable them below.'
             : 'Create volunteer/coordinator accounts and disable access when someone leaves. (Passwords arrive once cloud mode is configured.)'}
         </p>
 
@@ -346,16 +362,36 @@ export default function AdminSettings() {
           </div>
         )}
 
-        {!isCloudMode && (
         <form onSubmit={handleAddUser} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', marginBottom: '1.25rem', alignItems: 'end' }}>
           <div className="form-group" style={{ marginBottom: 0 }}>
             <label className="form-label">Full Name</label>
             <input type="text" className="form-control" placeholder="e.g. Mehul Trivedi" value={newUserName} onChange={(e) => setNewUserName(e.target.value)} required />
           </div>
           <div className="form-group" style={{ marginBottom: 0 }}>
-            <label className="form-label">Username</label>
-            <input type="text" className="form-control" placeholder="e.g. mehul_t" value={newUserUsername} onChange={(e) => setNewUserUsername(e.target.value)} required />
+            <label className="form-label">{isCloudMode ? 'Email (their login)' : 'Username'}</label>
+            <input
+              type={isCloudMode ? 'email' : 'text'}
+              className="form-control"
+              placeholder={isCloudMode ? 'e.g. mehul@example.com' : 'e.g. mehul_t'}
+              value={newUserUsername}
+              onChange={(e) => setNewUserUsername(e.target.value)}
+              required
+            />
           </div>
+          {isCloudMode && (
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Initial Password</label>
+              <input
+                type="text"
+                className="form-control"
+                placeholder="min. 6 characters"
+                value={newUserPassword}
+                onChange={(e) => setNewUserPassword(e.target.value)}
+                required
+                minLength={6}
+              />
+            </div>
+          )}
           <div className="form-group" style={{ marginBottom: 0 }}>
             <label className="form-label">Role</label>
             <select className="form-control" value={newUserRole} onChange={(e) => setNewUserRole(e.target.value)}>
@@ -364,12 +400,11 @@ export default function AdminSettings() {
               ))}
             </select>
           </div>
-          <button type="submit" className="btn btn-primary" style={{ padding: '0.6rem 1rem' }}>
+          <button type="submit" className="btn btn-primary" style={{ padding: '0.6rem 1rem' }} disabled={addingUser}>
             <Plus size={16} />
-            <span>Add User</span>
+            <span>{addingUser ? 'Creating…' : 'Add User'}</span>
           </button>
         </form>
-        )}
 
         <div className="table-container">
           <table className="custom-table">
@@ -384,10 +419,10 @@ export default function AdminSettings() {
             </thead>
             <tbody>
               {users.map(u => (
-                <tr key={u.username} style={{ opacity: u.enabled ? 1 : 0.55 }}>
+                <tr key={u.id} style={{ opacity: u.enabled ? 1 : 0.55 }}>
                   <td style={{ fontWeight: 600 }}>{u.name}</td>
                   <td style={{ color: 'var(--text-muted)' }}>
-                    {isCloudMode ? `#${String(u.username).slice(0, 8)}` : `@${u.username}`}
+                    {isCloudMode ? (u.email || `#${String(u.id).slice(0, 8)}`) : `@${u.username}`}
                   </td>
                   <td>
                     {isCloudMode ? (
@@ -415,8 +450,8 @@ export default function AdminSettings() {
                       onClick={() => handleToggleUser(u)}
                       className="btn btn-ghost"
                       style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem', color: u.enabled ? 'var(--danger)' : 'var(--success)' }}
-                      disabled={u.username === user?.username}
-                      title={u.username === user?.username ? 'You cannot disable your own account' : (u.enabled ? 'Disable account' : 'Enable account')}
+                      disabled={u.id === user?.id}
+                      title={u.id === user?.id ? 'You cannot disable your own account' : (u.enabled ? 'Disable account' : 'Enable account')}
                     >
                       {u.enabled ? 'Disable' : 'Enable'}
                     </button>

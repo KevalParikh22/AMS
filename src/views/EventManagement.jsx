@@ -20,8 +20,10 @@ import {
 
 // The public link is query-string routed, so it works from whatever path the
 // app is served at without any host rewrite rule.
+// Omitting eventId yields the permanent link: it resolves to whichever event
+// is Active when someone opens it, so it never goes stale.
 const buildShareUrl = (eventId) =>
-  `${window.location.origin}${window.location.pathname}?view=shared-registration&eventId=${eventId}`;
+  `${window.location.origin}${window.location.pathname}?view=shared-registration${eventId ? `&eventId=${eventId}` : ''}`;
 
 export default function EventManagement() {
   const { events, addEvent, updateEvent, sabhas, getEffectiveStatus, isEventExpired } = useDb();
@@ -29,6 +31,7 @@ export default function EventManagement() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [copiedEventId, setCopiedEventId] = useState(null);
   const [shareEventId, setShareEventId] = useState(null);
+  const [usePermanent, setUsePermanent] = useState(true);
 
   // Form States
   const [name, setName] = useState('');
@@ -63,7 +66,7 @@ export default function EventManagement() {
 
   const handleCopyLink = (eventId) => {
     navigator.clipboard.writeText(buildShareUrl(eventId)).then(() => {
-      setCopiedEventId(eventId);
+      setCopiedEventId(eventId || '__permanent__');
       setTimeout(() => setCopiedEventId(null), 2000);
     });
   };
@@ -324,6 +327,7 @@ export default function EventManagement() {
           if (!shareEvent) return null;
           const shareUrl = buildShareUrl(shareEvent.id);
           const shareIsDraft = getEffectiveStatus(shareEvent) === 'Draft';
+          const copied = copiedEventId === (usePermanent ? '__permanent__' : shareEvent.id);
 
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
@@ -356,15 +360,38 @@ export default function EventManagement() {
               )}
 
               <div style={{ display: 'flex', justifyContent: 'center' }}>
-                <QrCode value={shareUrl} size={180} />
+                <QrCode value={usePermanent ? buildShareUrl(null) : shareUrl} size={180} />
               </div>
+
+              <div style={{ display: 'flex', gap: '0.5rem', fontSize: '0.8rem' }}>
+                <button
+                  onClick={() => setUsePermanent(true)}
+                  className={usePermanent ? 'btn btn-primary' : 'btn btn-secondary'}
+                  style={{ flex: 1, padding: '0.45rem' }}
+                >
+                  Permanent link
+                </button>
+                <button
+                  onClick={() => setUsePermanent(false)}
+                  className={usePermanent ? 'btn btn-secondary' : 'btn btn-primary'}
+                  style={{ flex: 1, padding: '0.45rem' }}
+                >
+                  This event only
+                </button>
+              </div>
+
+              <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.6 }}>
+                {usePermanent
+                  ? 'Share once and reuse every week — it always checks people into whichever event is Active at that moment, so it can never point at a finished event.'
+                  : `Always targets ${shareEvent.name} specifically. Once that event ends the link falls back to the current Active event.`}
+              </p>
 
               <div className="form-group" style={{ marginBottom: 0 }}>
                 <label className="form-label">Link</label>
                 <input
                   type="text"
                   className="form-control"
-                  value={shareUrl}
+                  value={usePermanent ? buildShareUrl(null) : shareUrl}
                   readOnly
                   onFocus={(e) => e.target.select()}
                   style={{ fontSize: '0.8rem' }}
@@ -373,12 +400,12 @@ export default function EventManagement() {
 
               <div style={{ display: 'flex', gap: '0.75rem' }}>
                 <button
-                  onClick={() => handleCopyLink(shareEvent.id)}
+                  onClick={() => handleCopyLink(usePermanent ? null : shareEvent.id)}
                   className="btn btn-primary"
                   style={{ flex: 1 }}
                 >
-                  {copiedEventId === shareEvent.id ? <Check size={14} /> : <Copy size={14} />}
-                  <span>{copiedEventId === shareEvent.id ? 'Copied' : 'Copy Link'}</span>
+                  {copied ? <Check size={14} /> : <Copy size={14} />}
+                  <span>{copied ? 'Copied' : 'Copy Link'}</span>
                 </button>
                 <button onClick={() => setShareEventId(null)} className="btn btn-secondary">
                   Close

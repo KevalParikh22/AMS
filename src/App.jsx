@@ -33,7 +33,10 @@ function AppContent() {
     const viewParam = params.get('view');
     const eventIdParam = params.get('eventId');
     
-    if (viewParam === 'shared-registration' && eventIdParam) {
+    // eventId is optional: a link without one always targets whichever event
+    // is Active when the visitor opens it, so one permanent link can be shared
+    // instead of re-sharing a new link per event.
+    if (viewParam === 'shared-registration') {
       setView('shared-registration');
       setUrlParams({ view: viewParam, eventId: eventIdParam });
     }

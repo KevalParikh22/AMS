@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { supabase, isCloudMode } from '../lib/supabase';
+import { supabase, isCloudMode, createProvisioningClient } from '../lib/supabase';
 
 const AuthContext = createContext();
 
@@ -69,19 +69,24 @@ export const AuthProvider = ({ children }) => {
   });
 
   // Cloud mode: admins see the full profiles list (RLS restricts others)
+  const refreshCloudUsers = async () => {
+    if (!isCloudMode) return;
+    const { data } = await supabase.from('profiles').select('*').order('created_at');
+    if (!data) return;
+    setUsers(data.map(p => ({
+      id: p.id,
+      // profiles mirrors the email so the admin sees a person, not a UUID
+      username: p.email || p.id,
+      email: p.email || '',
+      name: p.name,
+      role: p.role,
+      enabled: p.enabled
+    })));
+  };
+
   useEffect(() => {
     if (!isCloudMode || !user || user.role !== ROLES.ADMIN) return;
-    supabase.from('profiles').select('*').order('created_at').then(({ data }) => {
-      if (data) {
-        setUsers(data.map(p => ({
-          id: p.id,
-          username: p.id, // profiles hold no email client-side; id keys the row
-          name: p.name,
-          role: p.role,
-          enabled: p.enabled
-        })));
-      }
-    });
+    refreshCloudUsers();
   }, [user?.id, user?.role]);
 
   const saveUsers = (updated) => {
@@ -119,15 +124,67 @@ export const AuthProvider = ({ children }) => {
 
   // --- User management (Admin only) ---
 
+  // Cloud mode: create a real Supabase login for a volunteer, without a
+  // service-role key and without disturbing the admin's own session.
+  //
+  // The account is created disabled by the handle_new_user trigger; this then
+  // applies the admin's chosen role and activates it. Async, so callers await.
+  const addCloudUser = async (name, email, password, role) => {
+    if (user?.role !== ROLES.ADMIN) {
+      return { success: false, message: 'Only administrators can manage users.' };
+    }
+    const trimmedName = name.trim();
+    const trimmedEmail = email.trim().toLowerCase();
+    if (!trimmedName || !trimmedEmail || !password) {
+      return { success: false, message: 'Name, email, and password are all required.' };
+    }
+    if (password.length < 6) {
+      return { success: false, message: 'Password must be at least 6 characters.' };
+    }
+    if (users.some(u => (u.email || '').toLowerCase() === trimmedEmail)) {
+      return { success: false, message: 'An account with that email already exists.' };
+    }
+
+    const provisioner = createProvisioningClient();
+    const { data, error } = await provisioner.auth.signUp({
+      email: trimmedEmail,
+      password,
+      options: { data: { name: trimmedName } }
+    });
+    if (error) return { success: false, message: error.message };
+
+    const newId = data?.user?.id;
+    if (!newId) {
+      // Happens when the project still requires email confirmation
+      return {
+        success: false,
+        message: 'Account created but not confirmed. Disable "Confirm email" in Supabase → Authentication → Providers, then try again.'
+      };
+    }
+
+    // The trigger created the row disabled at the default role; activating it
+    // with the intended role is the admin's explicit decision.
+    const { error: profileError } = await supabase
+      .from('profiles')
+      .update({ name: trimmedName, role: role || ROLES.REGISTRATION_VOLUNTEER, enabled: true })
+      .eq('id', newId);
+    if (profileError) {
+      return {
+        success: false,
+        message: `Login created, but assigning the role failed: ${profileError.message}. Set it from the list below.`
+      };
+    }
+
+    await refreshCloudUsers();
+    return { success: true, username: trimmedEmail };
+  };
+
   const addManagedUser = (name, username, role) => {
     if (user?.role !== ROLES.ADMIN) {
       return { success: false, message: 'Only administrators can manage users.' };
     }
     if (isCloudMode) {
-      return {
-        success: false,
-        message: 'In cloud mode, create accounts from the Supabase dashboard (Authentication → Users), then set their role here.'
-      };
+      return { success: false, message: 'Use addCloudUser in cloud mode.' };
     }
     const uname = username.trim().toLowerCase().replace(/\s+/g, '_');
     if (!name.trim() || !uname) {
@@ -245,7 +302,7 @@ export const AuthProvider = ({ children }) => {
   return (
     <AuthContext.Provider value={{
       user, login, logout, hasPermission, canViewGuardianDetails,
-      users, addManagedUser, setManagedUserEnabled, setManagedUserRole,
+      users, addManagedUser, addCloudUser, setManagedUserEnabled, setManagedUserRole,
       loginWithEmail, requestPasswordReset, completePasswordReset, recoveryMode,
       MOCK_USERS
     }}>

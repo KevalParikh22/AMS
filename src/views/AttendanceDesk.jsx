@@ -129,6 +129,7 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
   const {
     events,
     queryParticipants,
+    participants,
     attendance,
     markPresent,
     undoAttendance,
@@ -140,6 +141,7 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
   const canCorrectAttendance = hasPermission(ROLES.COORDINATOR);
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [syncError, setSyncError] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [visibleCount, setVisibleCount] = useState(30);
   const [showScanner, setShowScanner] = useState(false);
@@ -164,9 +166,23 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
 
   const activeEvent = events.find(e => e.id === selectedEventId);
 
+  // A mark is optimistic locally; in cloud mode the row still has to land in
+  // Postgres. If another volunteer won the race for the same participant, the
+  // unique (event_id, participant_id) constraint rejects it and DbContext rolls
+  // the row back — surface that instead of leaving a phantom "Present".
+  const reportSyncFailure = (name, result) => {
+    if (!result?.syncPromise) return;
+    result.syncPromise.catch(err => {
+      setSyncError(`${name}: ${err.message}`);
+      setTimeout(() => setSyncError(''), 5000);
+    });
+  };
+
   const handleMarkPresent = (participantId) => {
     if (!selectedEventId) return;
-    markPresent(selectedEventId, participantId);
+    const person = participants.find(p => p.id === participantId);
+    const result = markPresent(selectedEventId, participantId);
+    reportSyncFailure(person ? person.name : participantId, result);
   };
 
   // QR scan (or manual ID entry) → look up active participant and check in
@@ -182,6 +198,7 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
       return;
     }
     const result = markPresent(selectedEventId, match.item.id);
+    reportSyncFailure(match.item.name, result);
     setScanFeedback(result.success
       ? { ok: true, message: `${match.item.name} — ${t('desk.present')} ✓` }
       : { ok: false, message: `${match.item.name}: ${result.message}` });
@@ -282,6 +299,15 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
 
   return (
     <div className="container-padding animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+      {syncError && (
+        <div className="badge badge-danger" style={{
+          display: 'block', width: '100%', padding: '0.85rem',
+          borderRadius: 'var(--radius-sm)', marginBottom: '1rem'
+        }}>
+          {syncError}
+        </div>
+      )}
+
       
       {/* Target Event Picker */}
       <div className="glass-panel" style={{

@@ -177,6 +177,19 @@ export async function insertRow(storageKey, row) {
   if (error) throw new Error(`${cfg.table} insert: ${error.message}`);
 }
 
+// Delete a single row by key, leaving every other row untouched.
+//
+// Pairs with insertRow for tables that several devices write concurrently.
+// pushTable cannot be used there: it reconciles the WHOLE local array and
+// prunes anything missing from it, so a device that has not yet received a
+// peer's row would delete that peer's work.
+export async function deleteRow(storageKey, id) {
+  const cfg = TABLE_MAP[storageKey];
+  if (!cfg || !supabase) return;
+  const { error } = await supabase.from(cfg.table).delete().eq(cfg.key, id);
+  if (error) throw new Error(`${cfg.table} delete: ${error.message}`);
+}
+
 // Fetch a single table (used by realtime refresh).
 export async function fetchTable(storageKey) {
   const cfg = TABLE_MAP[storageKey];
