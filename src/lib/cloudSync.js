@@ -191,6 +191,22 @@ export async function insertRow(storageKey, row) {
   if (error) throw new Error(`${cfg.table} insert: ${error.message}`);
 }
 
+// Upsert a specific set of rows, with NO prune.
+//
+// For a targeted bulk edit — "move these 23 participants to another sabha" —
+// pushTable is the wrong tool: it reconciles the whole table and deletes any
+// cloud row missing from this device's array, so a slightly stale device would
+// destroy rows another device just added. This changes exactly the rows given
+// and leaves everything else alone.
+export async function upsertRows(storageKey, rows) {
+  const cfg = TABLE_MAP[storageKey];
+  if (!cfg || !supabase || rows.length === 0) return;
+  const { error } = await supabase
+    .from(cfg.table)
+    .upsert(rows.map(cfg.toRow), { onConflict: cfg.key, ignoreDuplicates: !!cfg.immutableRows });
+  if (error) throw new Error(`${cfg.table} bulk update: ${error.message}`);
+}
+
 // Delete a single row by key, leaving every other row untouched.
 //
 // Pairs with insertRow for tables that several devices write concurrently.

@@ -20,6 +20,7 @@ export default function AdminSettings() {
   const {
     sabhas,
     karyakars,
+    participants,
     auditLogs,
     clearDatabase,
     resetToFactoryDefault,
@@ -115,6 +116,8 @@ export default function AdminSettings() {
   // otherwise silently become a real sabha in every dropdown.
   const [mapPreview, setMapPreview] = useState(null);
   const [applyRemaps, setApplyRemaps] = useState(true);
+  // Off by default: this rewrites participant records, not just the lookup list.
+  const [cascadeParticipants, setCascadeParticipants] = useState(false);
   const [mapMsg, setMapMsg] = useState('');
   const mapFileRef = React.useRef(null);
 
@@ -169,13 +172,23 @@ export default function AdminSettings() {
           else unchanged.push(name);
         });
 
+        // How many balaks would follow their karyakar — same rule the cascade
+        // itself applies: active records still sitting in the karyakar's old sabha.
+        const moves = new Map(remaps.map(r => [r.name, r]));
+        const affectedParticipants = participants.filter(p => {
+          if (p.status !== 'approved' && p.status !== 'pending') return false;
+          const m = moves.get(p.karyakar);
+          return !!m && p.sabha === m.from;
+        }).length;
+
         setMapPreview({
           fileName: file.name,
           newKaryakars,
           remaps,
           unchanged,
           newSabhas: [...newSabhas],
-          skipped
+          skipped,
+          affectedParticipants
         });
       } catch (err) {
         console.error(err);
@@ -190,7 +203,8 @@ export default function AdminSettings() {
     const result = addLookupEntries({
       sabhas: mapPreview.newSabhas,
       karyakars: mapPreview.newKaryakars,
-      remapKaryakars: applyRemaps ? mapPreview.remaps.map(r => ({ name: r.name, sabha: r.to })) : []
+      remapKaryakars: applyRemaps ? mapPreview.remaps.map(r => ({ name: r.name, sabha: r.to })) : [],
+      cascadeParticipants: applyRemaps && cascadeParticipants
     });
     if (result.error) {
       setMapMsg(result.error);
@@ -198,7 +212,8 @@ export default function AdminSettings() {
     }
     setMapMsg(
       `Added ${result.addedKaryakars.length} karyakar(s) and ${result.addedSabhas.length} sabha(s)` +
-      (result.remapped.length ? `, remapped ${result.remapped.length}` : '') + '.'
+      (result.remapped.length ? `, remapped ${result.remapped.length}` : '') +
+      (result.movedParticipants ? `, moved ${result.movedParticipants} participant(s)` : '') + '.'
     );
     setMapPreview(null);
     if (mapFileRef.current) mapFileRef.current.value = '';
@@ -469,6 +484,23 @@ export default function AdminSettings() {
                         </div>
                       </span>
                     </label>
+
+                    {applyRemaps && mapPreview.affectedParticipants > 0 && (
+                      <label style={{ display: 'flex', gap: '0.4rem', alignItems: 'flex-start', cursor: 'pointer', marginTop: '0.5rem', paddingLeft: '1.25rem' }}>
+                        <input
+                          type="checkbox"
+                          checked={cascadeParticipants}
+                          onChange={(e) => setCascadeParticipants(e.target.checked)}
+                          style={{ marginTop: '0.15rem' }}
+                        />
+                        <span>
+                          Also move <strong>{mapPreview.affectedParticipants} balak(s)</strong> under {mapPreview.remaps.length === 1 ? 'that karyakar' : 'those karyakars'} into the new sabha.
+                          <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>
+                            Edits participant records. Only those still in the karyakar's old sabha are moved; anyone already elsewhere is left alone.
+                          </div>
+                        </span>
+                      </label>
+                    )}
                   </div>
                 )}
 

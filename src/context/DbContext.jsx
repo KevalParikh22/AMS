@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth, ROLES } from './AuthContext';
 import { isCloudMode } from '../lib/supabase';
-import { fetchAllTables, fetchTable, pushTable, insertRow, deleteRow, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
+import { fetchAllTables, fetchTable, pushTable, insertRow, upsertRows, deleteRow, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
 import { uniqueId } from '../lib/ids';
 import { extractGuardianPhone, normalizePhone, participantKey } from '../lib/participantIdentity';
 
@@ -463,7 +463,10 @@ export const DbProvider = ({ children }) => {
     // Karyakars that already exist but should be moved to a different sabha.
     // Kept separate from the add list because adding silently skips existing
     // names — a re-import could otherwise never correct a wrong mapping.
-    remapKaryakars = []
+    remapKaryakars = [],
+    // When a karyakar moves, optionally move the balaks under them too, so the
+    // roster does not keep pointing at the karyakar's old sabha.
+    cascadeParticipants = false
   }) => {
     if (!hasPermission(ROLES.ADMIN)) {
       return { error: 'Only administrators can edit master data.' };
@@ -508,17 +511,53 @@ export const DbProvider = ({ children }) => {
       saveToStorage('ams_karyakars', updatedKaryakars);
     }
 
+    // Move the balaks who follow a remapped karyakar. Restricted to those still
+    // sitting in that karyakar's OLD sabha: anyone already elsewhere is an
+    // inconsistency this import has no basis to resolve, so leave them be.
+    let movedParticipants = 0;
+    if (cascadeParticipants && remapped.length > 0) {
+      const moves = new Map(remapped.map(r => [r.name, r]));
+      const touched = [];
+      const nextParticipants = participants.map(p => {
+        if (p.status !== 'approved' && p.status !== 'pending') return p;
+        const move = moves.get(p.karyakar);
+        if (!move || p.sabha !== move.from) return p;
+        const updated = { ...p, sabha: move.to };
+        touched.push(updated);
+        return updated;
+      });
+
+      if (touched.length > 0) {
+        movedParticipants = touched.length;
+        setParticipants(nextParticipants);
+        if (isCloudMode) {
+          // Only the touched rows — never a full-table reconcile, which would
+          // prune participants this device has not received yet.
+          localStorage.setItem('ams_participants', JSON.stringify(nextParticipants));
+          upsertRows('ams_participants', touched)
+            .then(() => setCloudStatus('online'))
+            .catch(err => {
+              console.error('Cascade update failed:', err);
+              setCloudStatus('error');
+            });
+        } else {
+          saveToStorage('ams_participants', nextParticipants);
+        }
+      }
+    }
+
     if (addedSabhas.length > 0 || addedKaryakars.length > 0 || remapped.length > 0) {
       addAuditLog(
         'Add Import Lookups',
         `Created ${addedSabhas.length} sabha(s) and ${addedKaryakars.length} karyakar(s), remapped ${remapped.length}.` +
         (addedSabhas.length ? ` Sabhas: ${addedSabhas.join(', ')}.` : '') +
         (addedKaryakars.length ? ` Karyakars: ${addedKaryakars.map(k => `${k.name} → ${k.sabha}`).join(', ')}.` : '') +
-        (remapped.length ? ` Remapped: ${remapped.map(r => `${r.name} ${r.from} → ${r.to}`).join(', ')}.` : '')
+        (remapped.length ? ` Remapped: ${remapped.map(r => `${r.name} ${r.from} → ${r.to}`).join(', ')}.` : '') +
+        (movedParticipants ? ` Moved ${movedParticipants} participant(s) to follow their karyakar.` : '')
       );
     }
 
-    return { addedSabhas, addedKaryakars, remapped };
+    return { addedSabhas, addedKaryakars, remapped, movedParticipants };
   };
 
   // Register or insert spreadsheet imports (Admin only, per decision D4)
