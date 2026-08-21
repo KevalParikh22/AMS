@@ -52,7 +52,12 @@ This is the only account you create by hand; every other user is added from insi
 
 **Registration Volunteer** is the right tier for a typical event volunteer: marking attendance is the base level every signed-in user has, so this role covers both everyday jobs while corrections and approvals stay with you.
 
-To remove someone's access after the event, hit **Disable** — they are signed out on their next page load, and the server stops answering them regardless of any session they still hold.
+To revoke access after the event you have two options in **Admin Control**:
+
+- **Disable** — reversible. They are signed out on their next page load and the server stops answering them regardless of any session they hold. Use this for "not right now".
+- **Remove** (trash icon) — permanent. Deletes their profile, so they vanish from the list and can never sign in again. Attendance and audit history they created is kept, because those columns store a name, not a link to the account.
+
+One caveat on Remove in cloud mode: deleting the underlying Supabase login needs the service-role key, which must never ship in a browser, so **the auth user survives**. That grants nothing on its own — without a profile row every policy refuses them — but it does keep the email address reserved. To reuse that address, also delete it under **Authentication → Users** in the dashboard.
 
 ## 5. Connect the app
 
