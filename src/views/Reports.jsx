@@ -46,53 +46,66 @@ export default function Reports() {
   // Extract unique Sabhas from participants list
   const uniqueSabhas = ['All', ...new Set(participants.map(p => p.sabha))];
 
-  // List of participants that should attend (based on event scope and filters)
-  const targetParticipants = participants.filter(p => {
-    // Only approved registry members appear on standard rosters
-    if (p.status !== 'approved') return false;
+  // Who was actually marked present for this event, regardless of who was
+  // expected. This is the source of truth for the "Present" figure.
+  const presentIds = new Set(
+    attendance.filter(a => a.eventId === selectedEventId).map(a => a.participantId)
+  );
 
-    // Filter by Sabha scope of event
+  // Who was EXPECTED to attend: approved members within the event's sabha
+  // scope. Deliberately excludes the view filters below, so searching or
+  // changing the sabha dropdown never changes the headline numbers.
+  const isExpected = (p) => {
+    if (p.status !== 'approved') return false;
     if (activeEvent && activeEvent.sabhaMandalScope !== 'All Sabhas') {
       if (p.sabha !== activeEvent.sabhaMandalScope) return false;
     }
+    return true;
+  };
+  const targetParticipants = participants.filter(isExpected);
 
-    // Filter by manual dropdown sabha selection
+  // Marked present but NOT on the expected roster — a different sabha to the
+  // event's scope, or still pending review. These used to be dropped from the
+  // report entirely, so the Present count read lower than the number of people
+  // actually checked in at the desk.
+  const unexpectedPresent = participants.filter(p => presentIds.has(p.id) && !isExpected(p));
+
+  // View-only filters: these shape the table, never the aggregates.
+  const matchesView = (p) => {
     if (selectedSabha !== 'All' && p.sabha !== selectedSabha) return false;
-
-    // Filter by Search Query
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      const match = p.name.toLowerCase().includes(q) || 
-                    p.phone.includes(q) || 
-                    p.id.toLowerCase().includes(q);
-      if (!match) return false;
+      return p.name.toLowerCase().includes(q) ||
+        String(p.phone || '').includes(q) ||
+        p.id.toLowerCase().includes(q);
     }
-
     return true;
-  });
+  };
 
-  // Attach attendance state to participants list
-  const reportRoster = targetParticipants.map(p => {
-    const isPresent = attendance.some(
-      a => a.eventId === selectedEventId && a.participantId === p.id
-    );
-    return {
+  const reportRoster = [...targetParticipants, ...unexpectedPresent]
+    .filter(matchesView)
+    .map(p => ({
       ...p,
-      present: isPresent
-    };
-  }).filter(row => {
-    // Filter by Attendance Status (Present/Absent)
-    if (statusFilter === 'Present') return row.present;
-    if (statusFilter === 'Absent') return !row.present;
-    return true;
-  });
+      present: presentIds.has(p.id),
+      offRoster: !isExpected(p)
+    }))
+    .filter(row => {
+      // Filter by Attendance Status (Present/Absent)
+      if (statusFilter === 'Present') return row.present;
+      if (statusFilter === 'Absent') return !row.present;
+      return true;
+    });
 
-  // Aggregates
+  // Aggregates. Present counts everyone actually checked in — including the
+  // off-roster people — so it always matches the desk and the Dashboard.
   const totalExpected = targetParticipants.length;
-  const totalPresent = targetParticipants.filter(p => 
-    attendance.some(a => a.eventId === selectedEventId && a.participantId === p.id)
-  ).length;
-  const totalAbsent = totalExpected - totalPresent;
+  const presentOnRoster = targetParticipants.filter(p => presentIds.has(p.id)).length;
+  const totalPresent = presentOnRoster + unexpectedPresent.length;
+  const totalAbsent = totalExpected - presentOnRoster;
+
+  // Attendance rows whose participant no longer exists (removed/merged away).
+  // Counted separately so Present never silently disagrees with the raw count.
+  const orphanedMarks = presentIds.size - presentOnRoster - unexpectedPresent.length;
 
   // Pending public registrations list
   const pendingRegistrations = participants.filter(p => p.status === 'pending');
@@ -182,7 +195,8 @@ export default function Reports() {
       'Mandal/Sabha Class': row.sabha,
       'Responsible Karyakar': row.karyakar,
       'Guardian Contact Details': canViewGuardianDetails ? row.guardianDetails : 'Restricted',
-      'Attendance Status': row.present ? 'Present' : 'Absent'
+      'Attendance Status': row.present ? 'Present' : 'Absent',
+      'On Expected Roster': row.offRoster ? 'No (off-roster)' : 'Yes'
     })));
     XLSX.utils.book_append_sheet(wb, rosterSheet, 'Attendance Roster');
 
@@ -223,6 +237,7 @@ export default function Reports() {
       'Responsible Karyakar': row.karyakar,
       'Guardian Contact Details': canViewGuardianDetails ? row.guardianDetails : 'Restricted',
       'Attendance Status': row.present ? 'Present' : 'Absent',
+      'On Expected Roster': row.offRoster ? 'No (off-roster)' : 'Yes',
       'Marked Time': row.present 
         ? new Date(attendance.find(a => a.eventId === selectedEventId && a.participantId === row.id).markedAt).toLocaleString() 
         : '-'
@@ -415,11 +430,45 @@ export default function Reports() {
               <div className="card" style={{ padding: '1rem', borderColor: 'var(--success)' }}>
                 <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Present</span>
                 <h4 style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--success)', marginTop: '0.25rem' }}>{totalPresent}</h4>
+                {unexpectedPresent.length > 0 && (
+                  <span style={{ fontSize: '0.72rem', color: 'var(--warning)' }}>
+                    incl. {unexpectedPresent.length} off-roster
+                  </span>
+                )}
               </div>
               <div className="card" style={{ padding: '1rem', borderColor: 'var(--danger)' }}>
                 <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Absent</span>
                 <h4 style={{ fontSize: '1.5rem', fontWeight: 700, color: 'var(--danger)', marginTop: '0.25rem' }}>{totalAbsent}</h4>
               </div>
+            </div>
+          )}
+
+          {/* Why Present can exceed the expected roster */}
+          {(unexpectedPresent.length > 0 || orphanedMarks > 0) && (
+            <div style={{
+              backgroundColor: 'var(--warning-light)',
+              border: '1px solid var(--warning)',
+              borderRadius: 'var(--radius-md)',
+              padding: '0.85rem 1rem',
+              fontSize: '0.82rem',
+              lineHeight: 1.6
+            }}>
+              {unexpectedPresent.length > 0 && (
+                <div>
+                  <strong>{unexpectedPresent.length}</strong> {unexpectedPresent.length === 1 ? 'person was' : 'people were'} checked in
+                  but {unexpectedPresent.length === 1 ? 'is' : 'are'} not on this event's expected roster — a sabha outside
+                  {activeEvent && activeEvent.sabhaMandalScope !== 'All Sabhas'
+                    ? ` "${activeEvent.sabhaMandalScope}"`
+                    : ' the event scope'}, or still awaiting review.
+                  They are included in Present and listed below with an <em>Off-roster</em> tag.
+                </div>
+              )}
+              {orphanedMarks > 0 && (
+                <div style={{ marginTop: unexpectedPresent.length > 0 ? '0.4rem' : 0 }}>
+                  <strong>{orphanedMarks}</strong> attendance record(s) point at a participant that no longer exists
+                  (removed or merged). They are not shown in the list below.
+                </div>
+              )}
             </div>
           )}
 
@@ -476,7 +525,20 @@ export default function Reports() {
                   {reportRoster.slice(0, rosterVisible).map((row) => (
                     <tr key={row.id}>
                       <td style={{ color: 'var(--text-muted)' }}>{row.id}</td>
-                      <td style={{ fontWeight: 600 }}>{row.name}</td>
+                      <td style={{ fontWeight: 600 }}>
+                        {row.name}
+                        {row.offRoster && (
+                          <span
+                            className="badge badge-warning"
+                            style={{ marginLeft: '0.4rem', fontSize: '0.68rem' }}
+                            title={row.status !== 'approved'
+                              ? `Checked in but still ${row.status} — approve them to add them to the roster`
+                              : "Checked in but outside this event's sabha scope"}
+                          >
+                            Off-roster
+                          </span>
+                        )}
+                      </td>
                       <td>{row.phone}</td>
                       <td>{row.sabha}</td>
                       <td>{row.karyakar}</td>
