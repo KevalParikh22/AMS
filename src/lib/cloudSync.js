@@ -64,6 +64,10 @@ const TABLE_MAP = {
   ams_attendance: {
     table: 'attendance',
     key: 'id',
+    // A check-in is never edited — corrections happen by deleting the row — so
+    // attendance has no UPDATE policy. Re-pushing an existing id must therefore
+    // not take the ON CONFLICT DO UPDATE path. Still prunable, unlike audit_logs.
+    immutableRows: true,
     toRow: (a) => ({
       id: a.id,
       event_id: a.eventId,
@@ -96,7 +100,8 @@ const TABLE_MAP = {
   ams_audit_logs: {
     table: 'audit_logs',
     key: 'id',
-    appendOnly: true, // logs are immutable — only new rows are pushed
+    appendOnly: true,     // never pruned
+    immutableRows: true,  // and never updated — no UPDATE policy exists
     toRow: (l) => ({
       id: l.id,
       action: l.action,
@@ -143,7 +148,16 @@ export function pushTable(storageKey, rows) {
   const run = async () => {
     const mapped = rows.map(cfg.toRow);
     if (mapped.length > 0) {
-      const { error } = await supabase.from(cfg.table).upsert(mapped, { onConflict: cfg.key });
+      // Tables whose rows are immutable (audit_logs, attendance) have an
+      // INSERT policy but deliberately no UPDATE policy. A plain upsert emits
+      // ON CONFLICT DO UPDATE, so re-pushing a row whose id already exists
+      // fails with "violates row-level security policy (USING expression)" —
+      // and since callers push the whole local array, that is every push after
+      // the first. ignoreDuplicates sends resolution=ignore-duplicates, i.e.
+      // ON CONFLICT DO NOTHING, which needs no UPDATE policy.
+      const { error } = await supabase
+        .from(cfg.table)
+        .upsert(mapped, { onConflict: cfg.key, ignoreDuplicates: !!cfg.immutableRows });
       if (error) throw new Error(`${cfg.table} upsert: ${error.message}`);
     }
     if (!cfg.appendOnly) {
