@@ -28,6 +28,7 @@ export default function AdminSettings() {
     setSabhas,
     setKaryakars,
     saveToStorage,
+    addLookupEntries,
     addAuditLog
   } = useDb();
 
@@ -106,6 +107,111 @@ export default function AdminSettings() {
     }
     setUserMsg(result.message);
     setTimeout(() => setUserMsg(''), 8000);
+  };
+
+  // --- Karyakar ↔ sabha mapping import ---------------------------------
+  // Bulk-loads the lookup list from a two-column sheet. Nothing is written
+  // until the admin confirms the preview, because a typo'd sabha would
+  // otherwise silently become a real sabha in every dropdown.
+  const [mapPreview, setMapPreview] = useState(null);
+  const [applyRemaps, setApplyRemaps] = useState(true);
+  const [mapMsg, setMapMsg] = useState('');
+  const mapFileRef = React.useRef(null);
+
+  const KARYAKAR_SYNONYMS = ['karyakar', 'mentor', 'teacher', 'responsible'];
+  const SABHA_SYNONYMS = ['sabha', 'mandal', 'class', 'group'];
+
+  const handleMappingFile = (e) => {
+    setMapMsg('');
+    setMapPreview(null);
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const wb = XLSX.read(new Uint8Array(evt.target.result), { type: 'array' });
+        const matrix = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {
+          header: 1, defval: '', raw: false
+        });
+        if (matrix.length < 2) {
+          setMapMsg('That file has no data rows.');
+          return;
+        }
+        const headers = matrix[0].map(h => String(h).trim().toLowerCase());
+        // Match sabha first: "Karyakar Name" must not be captured by a loose
+        // sabha synonym, and vice versa.
+        const sabhaCol = headers.findIndex(h => SABHA_SYNONYMS.some(x => h.includes(x)));
+        const karyakarCol = headers.findIndex((h, i) => i !== sabhaCol && KARYAKAR_SYNONYMS.some(x => h.includes(x)));
+        if (karyakarCol === -1 || sabhaCol === -1) {
+          setMapMsg(`Could not find both columns. Found headers: ${matrix[0].join(', ') || '(none)'}. Expected a karyakar name column and a mandal/sabha column.`);
+          return;
+        }
+
+        const seen = new Set();
+        const newKaryakars = [];
+        const remaps = [];
+        const unchanged = [];
+        const newSabhas = new Set();
+        let skipped = 0;
+
+        matrix.slice(1).forEach(row => {
+          const name = String(row[karyakarCol] ?? '').trim();
+          const sabha = String(row[sabhaCol] ?? '').trim();
+          if (!name || !sabha) { skipped++; return; }
+          if (seen.has(name.toLowerCase())) { skipped++; return; }
+          seen.add(name.toLowerCase());
+
+          if (!sabhas.includes(sabha)) newSabhas.add(sabha);
+          const existing = karyakars.find(k => k.name === name);
+          if (!existing) newKaryakars.push({ name, sabha });
+          else if (existing.sabha !== sabha) remaps.push({ name, from: existing.sabha, to: sabha });
+          else unchanged.push(name);
+        });
+
+        setMapPreview({
+          fileName: file.name,
+          newKaryakars,
+          remaps,
+          unchanged,
+          newSabhas: [...newSabhas],
+          skipped
+        });
+      } catch (err) {
+        console.error(err);
+        setMapMsg('Could not read that file. Make sure it is a .csv or .xlsx.');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const handleApplyMapping = () => {
+    if (!mapPreview) return;
+    const result = addLookupEntries({
+      sabhas: mapPreview.newSabhas,
+      karyakars: mapPreview.newKaryakars,
+      remapKaryakars: applyRemaps ? mapPreview.remaps.map(r => ({ name: r.name, sabha: r.to })) : []
+    });
+    if (result.error) {
+      setMapMsg(result.error);
+      return;
+    }
+    setMapMsg(
+      `Added ${result.addedKaryakars.length} karyakar(s) and ${result.addedSabhas.length} sabha(s)` +
+      (result.remapped.length ? `, remapped ${result.remapped.length}` : '') + '.'
+    );
+    setMapPreview(null);
+    if (mapFileRef.current) mapFileRef.current.value = '';
+    setTimeout(() => setMapMsg(''), 6000);
+  };
+
+  const handleDownloadMappingSample = () => {
+    const rows = (karyakars.length ? karyakars : [{ name: 'Ghanshyam Patel', sabha: sabhas[0] || 'Bal Sabha - Sub-group A1' }])
+      .map(k => ({ 'Karyakar Name': k.name, 'Mandal-Sabha': k.sabha }));
+    const ws = XLSX.utils.json_to_sheet(rows, { header: ['Karyakar Name', 'Mandal-Sabha'] });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Karyakar Mapping');
+    XLSX.writeFile(wb, 'karyakar_mapping_sample.csv', { bookType: 'csv' });
   };
 
   // Audit filtering
@@ -293,6 +399,94 @@ export default function AdminSettings() {
               ))}
             </select>
           </form>
+
+          {/* Bulk import of the karyakar -> sabha mapping */}
+          <div style={{
+            border: '1px dashed var(--border-color)',
+            borderRadius: 'var(--radius-sm)',
+            padding: '0.75rem',
+            marginBottom: '1rem',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.6rem'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>Import mapping from a sheet</span>
+              <button onClick={handleDownloadMappingSample} className="btn btn-ghost" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem' }}>
+                <Download size={12} />
+                <span>Sample</span>
+              </button>
+            </div>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+              Two columns: <strong>Karyakar Name</strong> and <strong>Mandal-Sabha</strong>. Nothing is saved until you review the preview.
+            </p>
+            <input
+              type="file"
+              ref={mapFileRef}
+              accept=".csv,.xlsx,.xls"
+              onChange={handleMappingFile}
+              className="form-control"
+              style={{ fontSize: '0.75rem', padding: '0.35rem' }}
+            />
+
+            {mapMsg && (
+              <div className="badge badge-info" style={{ display: 'block', padding: '0.5rem', fontSize: '0.75rem', borderRadius: 'var(--radius-sm)' }}>
+                {mapMsg}
+              </div>
+            )}
+
+            {mapPreview && (
+              <div style={{ fontSize: '0.76rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                  <span className="badge badge-success">New: {mapPreview.newKaryakars.length}</span>
+                  <span className="badge badge-warning">Mapping changes: {mapPreview.remaps.length}</span>
+                  <span className="badge badge-info" style={{ opacity: 0.75 }}>Unchanged: {mapPreview.unchanged.length}</span>
+                  {mapPreview.skipped > 0 && <span className="badge badge-danger">Skipped: {mapPreview.skipped}</span>}
+                </div>
+
+                {mapPreview.newSabhas.length > 0 && (
+                  <div style={{ color: 'var(--warning)' }}>
+                    <strong>These sabhas do not exist yet and will be created:</strong>
+                    <div style={{ color: 'var(--text-secondary)' }}>{mapPreview.newSabhas.join(', ')}</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>Check for typos — a misspelling becomes a real sabha in every dropdown.</div>
+                  </div>
+                )}
+
+                {mapPreview.remaps.length > 0 && (
+                  <div>
+                    <label style={{ display: 'flex', gap: '0.4rem', alignItems: 'flex-start', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={applyRemaps}
+                        onChange={(e) => setApplyRemaps(e.target.checked)}
+                        style={{ marginTop: '0.15rem' }}
+                      />
+                      <span>
+                        <strong>Move {mapPreview.remaps.length} existing karyakar(s)</strong> to the sabha in the file:
+                        <div style={{ color: 'var(--text-secondary)' }}>
+                          {mapPreview.remaps.slice(0, 6).map(r => `${r.name}: ${r.from} → ${r.to}`).join('; ')}
+                          {mapPreview.remaps.length > 6 && ` …and ${mapPreview.remaps.length - 6} more`}
+                        </div>
+                      </span>
+                    </label>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button onClick={handleApplyMapping} className="btn btn-primary" style={{ padding: '0.35rem 0.8rem', fontSize: '0.76rem' }}>
+                    Apply
+                  </button>
+                  <button
+                    onClick={() => { setMapPreview(null); if (mapFileRef.current) mapFileRef.current.value = ''; }}
+                    className="btn btn-secondary"
+                    style={{ padding: '0.35rem 0.8rem', fontSize: '0.76rem' }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '200px', overflowY: 'auto' }}>
             {karyakars.map(k => (

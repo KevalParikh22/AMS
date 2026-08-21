@@ -457,7 +457,14 @@ export const DbProvider = ({ children }) => {
 
   // Add sabhas/karyakars an import referenced but that aren't configured yet.
   // Goes through saveToStorage so cloud mode syncs both lookup tables (Admin only, per D4).
-  const addLookupEntries = ({ sabhas: newSabhaNames = [], karyakars: newKaryakarEntries = [] }) => {
+  const addLookupEntries = ({
+    sabhas: newSabhaNames = [],
+    karyakars: newKaryakarEntries = [],
+    // Karyakars that already exist but should be moved to a different sabha.
+    // Kept separate from the add list because adding silently skips existing
+    // names — a re-import could otherwise never correct a wrong mapping.
+    remapKaryakars = []
+  }) => {
     if (!hasPermission(ROLES.ADMIN)) {
       return { error: 'Only administrators can edit master data.' };
     }
@@ -472,7 +479,7 @@ export const DbProvider = ({ children }) => {
     });
 
     const addedKaryakars = [];
-    const updatedKaryakars = [...karyakars];
+    let updatedKaryakars = [...karyakars];
     newKaryakarEntries.forEach(entry => {
       const name = String(entry?.name || '').trim();
       if (!name || updatedKaryakars.some(k => k.name === name)) return;
@@ -481,25 +488,37 @@ export const DbProvider = ({ children }) => {
       addedKaryakars.push({ name, sabha });
     });
 
+    const remapped = [];
+    remapKaryakars.forEach(entry => {
+      const name = String(entry?.name || '').trim();
+      const sabha = String(entry?.sabha || '').trim();
+      if (!name || !sabha) return;
+      const existing = updatedKaryakars.find(k => k.name === name);
+      if (!existing || existing.sabha === sabha) return;
+      remapped.push({ name, from: existing.sabha, to: sabha });
+      updatedKaryakars = updatedKaryakars.map(k => (k.name === name ? { ...k, sabha } : k));
+    });
+
     if (addedSabhas.length > 0) {
       setSabhas(updatedSabhas);
       saveToStorage('ams_sabhas', updatedSabhas);
     }
-    if (addedKaryakars.length > 0) {
+    if (addedKaryakars.length > 0 || remapped.length > 0) {
       setKaryakars(updatedKaryakars);
       saveToStorage('ams_karyakars', updatedKaryakars);
     }
 
-    if (addedSabhas.length > 0 || addedKaryakars.length > 0) {
+    if (addedSabhas.length > 0 || addedKaryakars.length > 0 || remapped.length > 0) {
       addAuditLog(
         'Add Import Lookups',
-        `Created ${addedSabhas.length} sabha(s) and ${addedKaryakars.length} karyakar(s) referenced by an imported roster.` +
+        `Created ${addedSabhas.length} sabha(s) and ${addedKaryakars.length} karyakar(s), remapped ${remapped.length}.` +
         (addedSabhas.length ? ` Sabhas: ${addedSabhas.join(', ')}.` : '') +
-        (addedKaryakars.length ? ` Karyakars: ${addedKaryakars.map(k => `${k.name} → ${k.sabha}`).join(', ')}.` : '')
+        (addedKaryakars.length ? ` Karyakars: ${addedKaryakars.map(k => `${k.name} → ${k.sabha}`).join(', ')}.` : '') +
+        (remapped.length ? ` Remapped: ${remapped.map(r => `${r.name} ${r.from} → ${r.to}`).join(', ')}.` : '')
       );
     }
 
-    return { addedSabhas, addedKaryakars };
+    return { addedSabhas, addedKaryakars, remapped };
   };
 
   // Register or insert spreadsheet imports (Admin only, per decision D4)
