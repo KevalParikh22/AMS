@@ -31,7 +31,7 @@ export default function AdminSettings() {
     addAuditLog
   } = useDb();
 
-  const { user, users, addManagedUser, addCloudUser, setManagedUserEnabled, setManagedUserRole } = useAuth();
+  const { user, users, addManagedUser, addCloudUser, removeManagedUser, setManagedUserEnabled, setManagedUserRole } = useAuth();
 
   // Lookup Entry Forms
   const [newSabha, setNewSabha] = useState('');
@@ -92,6 +92,20 @@ export default function AdminSettings() {
       setUserMsg(result.message);
       setTimeout(() => setUserMsg(''), 3500);
     }
+  };
+
+  const handleRemoveUser = async (u) => {
+    const warning = isCloudMode
+      ? `Remove ${u.name} (${u.email || u.username})?\n\nThey will be signed out and can never sign in again. Their attendance and audit history is kept.\n\nTheir Supabase login is not deleted — to reuse that email address you must also remove it from Authentication → Users in the dashboard.`
+      : `Remove ${u.name} (@${u.username})? They will no longer be able to sign in.`;
+    if (!window.confirm(warning)) return;
+
+    const result = await removeManagedUser(u);
+    if (result.success) {
+      addAuditLog('User Account Removed', `Removed account ${u.email || '@' + u.username} (${u.name}), role: ${u.role}.`);
+    }
+    setUserMsg(result.message);
+    setTimeout(() => setUserMsg(''), 8000);
   };
 
   // Audit filtering
@@ -446,15 +460,26 @@ export default function AdminSettings() {
                     </span>
                   </td>
                   <td>
-                    <button
-                      onClick={() => handleToggleUser(u)}
-                      className="btn btn-ghost"
-                      style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem', color: u.enabled ? 'var(--danger)' : 'var(--success)' }}
-                      disabled={u.id === user?.id}
-                      title={u.id === user?.id ? 'You cannot disable your own account' : (u.enabled ? 'Disable account' : 'Enable account')}
-                    >
-                      {u.enabled ? 'Disable' : 'Enable'}
-                    </button>
+                    <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                      <button
+                        onClick={() => handleToggleUser(u)}
+                        className="btn btn-ghost"
+                        style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem', color: u.enabled ? 'var(--danger)' : 'var(--success)' }}
+                        disabled={u.id === user?.id}
+                        title={u.id === user?.id ? 'You cannot disable your own account' : (u.enabled ? 'Temporarily revoke access; can be re-enabled' : 'Restore access')}
+                      >
+                        {u.enabled ? 'Disable' : 'Enable'}
+                      </button>
+                      <button
+                        onClick={() => handleRemoveUser(u)}
+                        className="btn btn-ghost"
+                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: 'var(--danger)' }}
+                        disabled={u.id === user?.id}
+                        title={u.id === user?.id ? 'You cannot remove your own account' : 'Remove this account permanently'}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

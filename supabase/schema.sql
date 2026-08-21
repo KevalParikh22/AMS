@@ -140,6 +140,13 @@ create policy profiles_select_own on public.profiles
 drop policy if exists profiles_admin_update on public.profiles;
 create policy profiles_admin_update on public.profiles
   for update using (public.has_permission('Admin'));
+-- Removing a volunteer deletes their profile row. my_role() then returns NULL
+-- for them, so RLS refuses them everywhere and the app signs them out — the
+-- auth.users row survives (deleting that needs the service key, i.e. the
+-- dashboard), but it grants nothing on its own.
+drop policy if exists profiles_admin_delete on public.profiles;
+create policy profiles_admin_delete on public.profiles
+  for delete using (public.has_permission('Admin'));
 
 -- Sabhas: readable by anyone (the public form lists them); writes are Admin.
 drop policy if exists sabhas_read on public.sabhas;

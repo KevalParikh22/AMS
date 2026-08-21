@@ -162,6 +162,17 @@ export const AuthProvider = ({ children }) => {
       };
     }
 
+    // Supabase does not error on a duplicate email (that would let anyone probe
+    // which addresses are registered). It returns a decoy user with no
+    // identities instead. This is the normal outcome when re-adding someone who
+    // was removed, since removal cannot delete the underlying auth user.
+    if (Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      return {
+        success: false,
+        message: `${trimmedEmail} already has a login in Supabase. Delete it under Authentication → Users, then add them again.`
+      };
+    }
+
     // The trigger created the row disabled at the default role; activating it
     // with the intended role is the admin's explicit decision.
     const { error: profileError } = await supabase
@@ -227,6 +238,48 @@ export const AuthProvider = ({ children }) => {
     }
     saveUsers(users.map(u => u.username === username ? { ...u, enabled } : u));
     return { success: true };
+  };
+
+  // Remove a user account entirely (Admin only).
+  //
+  // Cloud mode deletes the profiles row, not the auth user — deleting from
+  // auth.users needs the service-role key, which must never ship in a browser.
+  // That is enough to revoke access completely: my_role() returns NULL without
+  // a profile, so every RLS policy refuses them and onAuthStateChange signs
+  // them out. The leftover auth.users row grants nothing, but it does keep the
+  // email reserved, so re-adding the same address needs a dashboard delete.
+  //
+  // Attendance and audit history are unaffected: marked_by and user_id are
+  // plain text, not foreign keys, so nothing cascades.
+  const removeManagedUser = async (target) => {
+    if (user?.role !== ROLES.ADMIN) {
+      return { success: false, message: 'Only administrators can manage users.' };
+    }
+    if (!target) return { success: false, message: 'User not found.' };
+
+    const isSelf = isCloudMode ? target.id === user.id : target.username === user.username;
+    if (isSelf) {
+      return { success: false, message: 'You cannot remove your own account.' };
+    }
+    const otherEnabledAdmins = users.filter(
+      u => u.role === ROLES.ADMIN && u.enabled && u.id !== target.id
+    );
+    if (target.role === ROLES.ADMIN && otherEnabledAdmins.length === 0) {
+      return { success: false, message: 'At least one enabled admin account is required.' };
+    }
+
+    if (isCloudMode) {
+      const { error } = await supabase.from('profiles').delete().eq('id', target.id);
+      if (error) return { success: false, message: `Could not remove the account: ${error.message}` };
+      setUsers(prev => prev.filter(u => u.id !== target.id));
+      return {
+        success: true,
+        message: `${target.name} can no longer sign in. Their login still exists in Supabase — delete it under Authentication → Users if you want to reuse ${target.email || 'that email'}.`
+      };
+    }
+
+    saveUsers(users.filter(u => u.username !== target.username));
+    return { success: true, message: `${target.name} removed.` };
   };
 
   // Cloud mode: admins can change a user's role from the app
@@ -302,7 +355,7 @@ export const AuthProvider = ({ children }) => {
   return (
     <AuthContext.Provider value={{
       user, login, logout, hasPermission, canViewGuardianDetails,
-      users, addManagedUser, addCloudUser, setManagedUserEnabled, setManagedUserRole,
+      users, addManagedUser, addCloudUser, removeManagedUser, setManagedUserEnabled, setManagedUserRole,
       loginWithEmail, requestPasswordReset, completePasswordReset, recoveryMode,
       MOCK_USERS
     }}>
