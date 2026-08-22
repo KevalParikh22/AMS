@@ -322,6 +322,12 @@ export const DbProvider = ({ children }) => {
   }, []);
 
   // Realtime: refresh a table when another device changes it
+  // Tables this device is currently writing to. A realtime event that lands
+  // mid-write would refetch the server's pre-write copy and overwrite the
+  // local change — which is what made an approval silently revert to pending.
+  // The write's own success/failure path reconciles instead.
+  const inFlightWrites = React.useRef(new Set());
+
   useEffect(() => {
     if (!isCloudMode) return;
     const setters = {
@@ -333,8 +339,11 @@ export const DbProvider = ({ children }) => {
       ams_audit_logs: setAuditLogs
     };
     const unsubscribe = subscribeToChanges(async (storageKey) => {
+      if (inFlightWrites.current.has(storageKey)) return;
       try {
         const rows = await fetchTable(storageKey);
+        // Re-check: a write may have started while the fetch was in flight.
+        if (inFlightWrites.current.has(storageKey)) return;
         setters[storageKey](rows);
         localStorage.setItem(storageKey, JSON.stringify(rows));
       } catch (err) {
@@ -343,6 +352,13 @@ export const DbProvider = ({ children }) => {
     });
     return unsubscribe;
   }, []);
+
+  // Run a cloud write with its table marked busy, so the realtime handler
+  // does not refetch over the top of it.
+  const trackWrite = (key, promise) => {
+    inFlightWrites.current.add(key);
+    return promise.finally(() => inFlightWrites.current.delete(key));
+  };
 
   // Pull the authoritative copy of one table after a rejected write, so the
   // device stops showing a row the server never accepted.
@@ -360,7 +376,7 @@ export const DbProvider = ({ children }) => {
   const saveToStorage = (key, data) => {
     localStorage.setItem(key, JSON.stringify(data));
     if (isCloudMode) {
-      pushTable(key, data)
+      trackWrite(key, pushTable(key, data))
         .then(() => setCloudStatus('online'))
         .catch(err => {
           console.error('Cloud sync failed:', err);
@@ -742,7 +758,7 @@ export const DbProvider = ({ children }) => {
       // prune every row missing from this device's copy — which silently
       // deletes marks made by other volunteers in the last few seconds.
       localStorage.setItem('ams_attendance', JSON.stringify(updatedAttendance));
-      syncPromise = insertRow('ams_attendance', newAttendance)
+      syncPromise = trackWrite('ams_attendance', insertRow('ams_attendance', newAttendance))
         .then(() => setCloudStatus('online'))
         .catch(err => {
           // The (event_id, participant_id) unique constraint is the real
@@ -795,7 +811,7 @@ export const DbProvider = ({ children }) => {
       // Delete just this row, for the same reason markPresent inserts just one:
       // a full-table reconcile would prune concurrent volunteers' marks.
       localStorage.setItem('ams_attendance', JSON.stringify(updated));
-      deleteRow('ams_attendance', record.id)
+      trackWrite('ams_attendance', deleteRow('ams_attendance', record.id))
         .then(() => setCloudStatus('online'))
         .catch(err => {
           console.error('Undo attendance failed:', err);
@@ -989,7 +1005,7 @@ export const DbProvider = ({ children }) => {
       // prune any cloud participant missing from this device's copy, so two
       // coordinators editing from stale tabs could delete each other's people.
       localStorage.setItem('ams_participants', JSON.stringify(updatedList));
-      upsertRows('ams_participants', [updatedRecord])
+      trackWrite('ams_participants', upsertRows('ams_participants', [updatedRecord]))
         .then(() => setCloudStatus('online'))
         .catch(err => {
           console.error('Participant update failed:', err);
@@ -1017,13 +1033,33 @@ export const DbProvider = ({ children }) => {
     const target = participants.find(p => p.id === participantId);
     if (!target) return { success: false, message: 'Participant not found.' };
 
-    const updatedList = participants.map(p =>
-      p.id === participantId ? { ...p, status, ...extraFields } : p
-    );
+    const updatedRecord = { ...target, status, ...extraFields };
+    const updatedList = participants.map(p => (p.id === participantId ? updatedRecord : p));
     setParticipants(updatedList);
-    saveToStorage('ams_participants', updatedList);
+
+    let syncPromise;
+    if (isCloudMode) {
+      // Write just this row, like updateParticipant. saveToStorage would push
+      // the whole array and prune anything missing from this device's copy —
+      // and for an Admin that prune really executes, so a stale array deletes
+      // participants added since the last refresh.
+      localStorage.setItem('ams_participants', JSON.stringify(updatedList));
+      syncPromise = trackWrite('ams_participants', upsertRows('ams_participants', [updatedRecord]))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          // Put the UI back to what the server actually holds, rather than
+          // leaving it showing a change that was refused.
+          console.error('Status change failed:', err);
+          setCloudStatus('error');
+          refreshFromCloud('ams_participants', rows => setParticipants(migrateParticipantsList(rows)));
+          throw new Error('Could not save that change — check the connection and try again.');
+        });
+    } else {
+      saveToStorage('ams_participants', updatedList);
+    }
+
     addAuditLog(action, details.replace('{name}', target.name));
-    return { success: true };
+    return { success: true, participant: updatedRecord, syncPromise };
   };
 
   const approveParticipant = (participantId) =>

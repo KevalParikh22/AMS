@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import QrCode from '../components/QrCode';
 import Modal from '../components/Modal';
 import ParticipantEditModal from '../components/ParticipantEditModal';
+import { participantKey } from '../lib/participantIdentity';
 import * as XLSX from 'xlsx';
 import {
   Download,
@@ -143,6 +144,7 @@ export default function Reports() {
   const [showBadgeSheet, setShowBadgeSheet] = useState(false);
   const [rosterVisible, setRosterVisible] = useState(50);
   const [editingParticipant, setEditingParticipant] = useState(null);
+  const [reviewMsg, setReviewMsg] = useState(null);
 
   // Sabha-wise attendance summary across events (Phase 0 decision D8).
   // Draft events are excluded; expected = members x relevant events.
@@ -258,24 +260,66 @@ export default function Reports() {
     addAuditLog('Export Report', `Exported attendance report for event "${activeEvent.name}" to Excel.`);
   };
 
-  // Review Flow Actions — proper record states, no name/ID rewrites
+  // Review Flow Actions — proper record states, no name/ID rewrites.
+  // Every one of these returns { success, message }; showing it matters,
+  // because a refused action used to look identical to a successful one.
+  const reportReview = (result, successMsg) => {
+    if (!result?.success) {
+      setReviewMsg({ ok: false, text: result?.message || 'That action could not be completed.' });
+    } else {
+      setReviewMsg({ ok: true, text: successMsg });
+      // In cloud mode the change is only real once the row reaches Supabase.
+      result.syncPromise?.catch(err =>
+        setReviewMsg({ ok: false, text: err.message })
+      );
+    }
+    setTimeout(() => setReviewMsg(null), 8000);
+  };
+
   const handleApproveRegistration = (pId) => {
-    approveParticipant(pId);
+    const person = participants.find(x => x.id === pId);
+    const result = approveParticipant(pId);
+    // An approved person only joins the roster if their sabha matches the
+    // selected event's scope, and that event defaults to events[0] — one the
+    // reviewer never picked. Say so rather than letting them vanish.
+    const onThisRoster = person && (!activeEvent
+      || activeEvent.sabhaMandalScope === 'All Sabhas'
+      || activeEvent.sabhaMandalScope === person.sabha);
+    reportReview(
+      result,
+      `${person?.name || 'Registration'} approved.` + (onThisRoster
+        ? ''
+        : ` They are in "${person?.sabha}", so they do not appear on the roster for ${activeEvent?.name} — switch the event filter to see them.`)
+    );
   };
 
   const handleLinkToExisting = (pId, existingId) => {
+    const pending = participants.find(p => p.id === pId);
+    const existing = participants.find(p => p.id === existingId);
+    // This marks someone present AND removes the registrant from the roster.
+    // On a false match — two siblings sharing a guardian number — that credits
+    // the wrong person and makes the real attendee disappear, so confirm first.
+    if (!window.confirm(
+      `Treat "${pending?.name}" as the same person as "${existing?.name}" (${existingId})?\n\n` +
+      `"${existing?.name}" will be marked present, and "${pending?.name}" will be removed from the roster as a duplicate.\n\n` +
+      `If they are siblings sharing a guardian number, cancel and use Approve instead.`
+    )) return;
+
     // Mark existing participant present for the event the registration targeted,
     // falling back to the event selected in the attendance tab
-    const pending = participants.find(p => p.id === pId);
     const targetEventId = (pending && pending.registeredForEventId) || selectedEventId;
     if (targetEventId) {
       markPresent(targetEventId, existingId);
     }
-    linkParticipant(pId, existingId);
+    reportReview(
+      linkParticipant(pId, existingId),
+      `Linked "${pending?.name}" to ${existing?.name} and marked them present.`
+    );
   };
 
   const handleRejectRegistration = (pId) => {
-    rejectParticipant(pId);
+    const person = participants.find(x => x.id === pId);
+    reportReview(rejectParticipant(pId), `${person?.name || 'Registration'} rejected.`);
   };
 
   return (
@@ -875,13 +919,41 @@ export default function Reports() {
             Check new registrations, approve them into the registry, or link to pre-existing participant sheets.
           </p>
 
+          {reviewMsg && (
+            <div
+              className={`badge ${reviewMsg.ok ? 'badge-success' : 'badge-danger'}`}
+              style={{ display: 'block', width: '100%', padding: '0.85rem', borderRadius: 'var(--radius-sm)', marginBottom: '1.25rem', fontSize: '0.85rem' }}
+            >
+              {reviewMsg.text}
+            </div>
+          )}
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
             {pendingRegistrations.map((p) => {
-              // Find likely duplicate match candidates in database
-              const matches = participants.filter(exist =>
-                exist.status === 'approved' &&
-                (exist.phone === p.phone || exist.name.toLowerCase().trim() === p.name.toLowerCase().trim())
-              );
+              // Candidate duplicates, each labelled with WHY it matched.
+              //
+              // Matching on phone alone is wrong twice over now that phone holds
+              // the GUARDIAN's number: blank phones are stored as '' so '' === ''
+              // made every phone-less record match every other one, and siblings
+              // deliberately share a guardian number. Identity is name + number
+              // together (participantKey), so anything less is a maybe, not a
+              // "same person" — and the reviewer needs to see which.
+              const pendingKey = participantKey(p.name, p.phone);
+              const matches = participants
+                .map(exist => {
+                  if (exist.status !== 'approved' || exist.id === p.id) return null;
+                  const sameName = exist.name.toLowerCase().trim() === p.name.toLowerCase().trim();
+                  // Never treat two blank numbers as the same number
+                  const samePhone = Boolean(p.phone) && exist.phone === p.phone;
+                  if (participantKey(exist.name, exist.phone) === pendingKey && p.phone) {
+                    return { ...exist, reason: 'Same name and guardian number', confident: true };
+                  }
+                  if (samePhone) return { ...exist, reason: 'Same guardian number — may be a sibling', confident: false };
+                  if (sameName) return { ...exist, reason: 'Same name — different guardian number', confident: false };
+                  return null;
+                })
+                .filter(Boolean)
+                .sort((a, b) => Number(b.confident) - Number(a.confident));
               
               return (
                 <div key={p.id} style={{
@@ -941,13 +1013,24 @@ export default function Reports() {
                     }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--warning)', fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.5rem' }}>
                         <AlertCircle size={14} />
-                        <span>Found Matching Master Record:</span>
+                        <span>Possible existing record{matches.length > 1 ? 's' : ''} — check before linking:</span>
                       </div>
                       
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', paddingBottom: '0.35rem', borderBottom: '1px dashed var(--border-color)' }}>
+                          This registration: <strong>{p.name}</strong> | {p.phone || 'no guardian number'} | {p.sabha}
+                        </div>
                         {matches.map(m => (
-                          <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem' }}>
-                            <span>Name: {m.name} | Phone: {m.phone} | Sabha: {m.sabha}</span>
+                          <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', fontSize: '0.8rem' }}>
+                            <span>
+                              <strong>{m.name}</strong> ({m.id}) | {m.phone || 'no guardian number'} | {m.sabha}
+                              <span
+                                className={`badge ${m.confident ? 'badge-warning' : 'badge-info'}`}
+                                style={{ marginLeft: '0.4rem', fontSize: '0.68rem' }}
+                              >
+                                {m.reason}
+                              </span>
+                            </span>
                             <button
                               onClick={() => handleLinkToExisting(p.id, m.id)}
                               className="btn btn-secondary"
