@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useDb } from '../context/DbContext';
+import { isCloudMode } from '../lib/supabase';
 import { useAuth, ROLES } from '../context/AuthContext';
 import { useLang } from '../i18n/LanguageContext';
 import Modal from '../components/Modal';
@@ -165,6 +166,12 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
   }, [searchQuery, queryParticipants]);
 
   const activeEvent = events.find(e => e.id === selectedEventId);
+
+  // An empty roster in cloud mode means the read returned nothing, not that the
+  // search missed. RLS denies these rows to an unauthenticated or disabled
+  // account as an empty SUCCESS, so nothing else reports it — and cloudStatus
+  // is only rendered on the Admin-only settings screen.
+  const rosterUnavailable = isCloudMode && participants.length === 0;
 
   // A mark is optimistic locally; in cloud mode the row still has to land in
   // Postgres. If another volunteer won the race for the same participant, the
@@ -514,9 +521,15 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
               }}>
                 <AlertTriangle size={36} color="var(--warning)" />
                 <div>
-                  <h4 style={{ fontWeight: 600, fontSize: '1.1rem' }}>No Matches Found</h4>
+                  <h4 style={{ fontWeight: 600, fontSize: '1.1rem' }}>
+                    {rosterUnavailable ? 'Roster Not Loaded' : 'No Matches Found'}
+                  </h4>
                   <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginTop: '0.25rem' }}>
-                    "{searchQuery}" did not match any name, phone, or sabha in the master roster.
+                    {rosterUnavailable
+                      ? 'No participants could be loaded for this device. Reload the page — if it stays empty, sign out and back in.'
+                      : searchQuery.trim()
+                        ? `"${searchQuery}" did not match any name, phone, or sabha in the master roster.`
+                        : 'The roster is empty — import a roster or register someone.'}
                   </p>
                 </div>
                 <button

@@ -164,6 +164,11 @@ const nextSeqId = (prefix, counterKey, list) => {
   return prefix + next;
 };
 
+// Tables whose RLS requires an enabled profile (my_role() is not null). Read
+// without a session they return an empty success, not an error, so results
+// from an unauthenticated read must never be treated as authoritative.
+const RESTRICTED_TABLES = ['ams_participants', 'ams_attendance', 'ams_karyakars', 'ams_audit_logs'];
+
 // Migrate legacy participant records (pendingReview flags, "[REJECTED]" name
 // prefixes, "LINKED-" id rewrites) into explicit lifecycle statuses.
 const migrateParticipantsList = (list) => list.map(p => {
@@ -262,6 +267,11 @@ export const DbProvider = ({ children }) => {
       return;
     }
 
+    // Whether this pass carries a real JWT. DbProvider mounts above the login
+    // gate, and supabase-js falls back to the anon key when there is no
+    // session, so the first pass is genuinely unauthenticated.
+    const signedIn = Boolean(user);
+
     // Cloud mode: preserve any pre-cloud sandbox data once, so it can be
     // uploaded later from Admin Control (the cloud load overwrites the cache).
     if (!localStorage.getItem('ams_sandbox_backup')) {
@@ -277,8 +287,6 @@ export const DbProvider = ({ children }) => {
 
     fetchAllTables()
       .then(data => {
-        setParticipants(migrateParticipantsList(data.ams_participants));
-
         // Auto-close sweep against cloud events
         let loadedEvents = data.ams_events;
         const expired = loadedEvents.filter(e => e.status !== 'Closed' && isEventExpired(e));
@@ -300,18 +308,31 @@ export const DbProvider = ({ children }) => {
           pushTable('ams_audit_logs', [closeLog]).catch(() => {});
         }
         setEvents(loadedEvents);
-        setAttendance(data.ams_attendance);
         setSabhas(data.ams_sabhas);
-        setKaryakars(data.ams_karyakars);
-        setAuditLogs(logs);
 
-        // Refresh the local cache with cloud truth
-        localStorage.setItem('ams_participants', JSON.stringify(data.ams_participants));
+        // participants / attendance / karyakars are gated on my_role() being
+        // non-null. Read without a session they come back as an EMPTY SUCCESS
+        // (PostgREST returns 200 [] rather than an error), so an unauthenticated
+        // boot must treat them as "unknown", never as "there is nobody". events
+        // and sabhas are `using (true)` and are always trustworthy.
+        if (signedIn) {
+          setParticipants(migrateParticipantsList(data.ams_participants));
+          setAttendance(data.ams_attendance);
+          setKaryakars(data.ams_karyakars);
+          setAuditLogs(logs);
+        }
+
+        // Refresh the local cache with cloud truth — again, only what this
+        // read was actually allowed to see, so a signed-out boot cannot wipe
+        // the roster the device already had.
         localStorage.setItem('ams_events', JSON.stringify(loadedEvents));
-        localStorage.setItem('ams_attendance', JSON.stringify(data.ams_attendance));
         localStorage.setItem('ams_sabhas', JSON.stringify(data.ams_sabhas));
-        localStorage.setItem('ams_karyakars', JSON.stringify(data.ams_karyakars));
-        localStorage.setItem('ams_audit_logs', JSON.stringify(logs));
+        if (signedIn) {
+          localStorage.setItem('ams_participants', JSON.stringify(data.ams_participants));
+          localStorage.setItem('ams_attendance', JSON.stringify(data.ams_attendance));
+          localStorage.setItem('ams_karyakars', JSON.stringify(data.ams_karyakars));
+          localStorage.setItem('ams_audit_logs', JSON.stringify(logs));
+        }
         setCloudStatus('online');
       })
       .catch(err => {
@@ -319,14 +340,24 @@ export const DbProvider = ({ children }) => {
         loadFromLocal(false);
         setCloudStatus('offline');
       });
-  }, []);
+    // Re-runs when a session appears. DbProvider mounts ABOVE the login gate,
+    // so the first pass happens with the anon key and can only see the public
+    // tables; without this dependency the roster stayed empty until a manual
+    // page reload. Keyed on the id, not the user object, so an unrelated
+    // re-render cannot trigger a full refetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   // Realtime: refresh a table when another device changes it
   // Tables this device is currently writing to. A realtime event that lands
   // mid-write would refetch the server's pre-write copy and overwrite the
   // local change — which is what made an approval silently revert to pending.
   // The write's own success/failure path reconciles instead.
-  const inFlightWrites = React.useRef(new Set());
+  // Counts, not a Set: with a Set, two overlapping writes to one table meant
+  // the first to settle cleared the marker while the second was still in
+  // flight, reopening the very window this guard exists to close.
+  const inFlightWrites = React.useRef(new Map());
+  const isWriting = (key) => (inFlightWrites.current.get(key) || 0) > 0;
 
   useEffect(() => {
     if (!isCloudMode) return;
@@ -339,11 +370,15 @@ export const DbProvider = ({ children }) => {
       ams_audit_logs: setAuditLogs
     };
     const unsubscribe = subscribeToChanges(async (storageKey) => {
-      if (inFlightWrites.current.has(storageKey)) return;
+      // Same trap as the initial load: without a session these tables read
+      // back as an empty success, so applying the result would blank the
+      // roster and poison the cache.
+      if (!user && RESTRICTED_TABLES.includes(storageKey)) return;
+      if (isWriting(storageKey)) return;
       try {
         const rows = await fetchTable(storageKey);
         // Re-check: a write may have started while the fetch was in flight.
-        if (inFlightWrites.current.has(storageKey)) return;
+        if (isWriting(storageKey)) return;
         setters[storageKey](rows);
         localStorage.setItem(storageKey, JSON.stringify(rows));
       } catch (err) {
@@ -351,13 +386,28 @@ export const DbProvider = ({ children }) => {
       }
     });
     return unsubscribe;
-  }, []);
+    // Re-subscribes when the signed-in identity changes, so the callback's
+    // closure always holds the current user. Keyed on the id deliberately.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   // Run a cloud write with its table marked busy, so the realtime handler
   // does not refetch over the top of it.
   const trackWrite = (key, promise) => {
-    inFlightWrites.current.add(key);
-    return promise.finally(() => inFlightWrites.current.delete(key));
+    const m = inFlightWrites.current;
+    m.set(key, (m.get(key) || 0) + 1);
+    const release = () => {
+      const n = (m.get(key) || 1) - 1;
+      if (n > 0) m.set(key, n); else m.delete(key);
+    };
+    // supabase-js sets no fetch timeout, so a request stalled on a dead
+    // connection would otherwise block this table's realtime refresh for the
+    // rest of the session. Release the marker regardless.
+    const safety = setTimeout(release, 30000);
+    return promise.finally(() => {
+      clearTimeout(safety);
+      release();
+    });
   };
 
   // Pull the authoritative copy of one table after a rejected write, so the
