@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth, ROLES } from './AuthContext';
 import { isCloudMode } from '../lib/supabase';
-import { fetchAllTables, fetchTable, pushTable, insertRow, deleteRow, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
+import { fetchAllTables, fetchTable, pushTable, insertRow, upsertRows, deleteRow, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
 import { uniqueId } from '../lib/ids';
 import { extractGuardianPhone, normalizePhone, participantKey } from '../lib/participantIdentity';
 
@@ -457,7 +457,17 @@ export const DbProvider = ({ children }) => {
 
   // Add sabhas/karyakars an import referenced but that aren't configured yet.
   // Goes through saveToStorage so cloud mode syncs both lookup tables (Admin only, per D4).
-  const addLookupEntries = ({ sabhas: newSabhaNames = [], karyakars: newKaryakarEntries = [] }) => {
+  const addLookupEntries = ({
+    sabhas: newSabhaNames = [],
+    karyakars: newKaryakarEntries = [],
+    // Karyakars that already exist but should be moved to a different sabha.
+    // Kept separate from the add list because adding silently skips existing
+    // names — a re-import could otherwise never correct a wrong mapping.
+    remapKaryakars = [],
+    // When a karyakar moves, optionally move the balaks under them too, so the
+    // roster does not keep pointing at the karyakar's old sabha.
+    cascadeParticipants = false
+  }) => {
     if (!hasPermission(ROLES.ADMIN)) {
       return { error: 'Only administrators can edit master data.' };
     }
@@ -472,7 +482,7 @@ export const DbProvider = ({ children }) => {
     });
 
     const addedKaryakars = [];
-    const updatedKaryakars = [...karyakars];
+    let updatedKaryakars = [...karyakars];
     newKaryakarEntries.forEach(entry => {
       const name = String(entry?.name || '').trim();
       if (!name || updatedKaryakars.some(k => k.name === name)) return;
@@ -481,25 +491,73 @@ export const DbProvider = ({ children }) => {
       addedKaryakars.push({ name, sabha });
     });
 
+    const remapped = [];
+    remapKaryakars.forEach(entry => {
+      const name = String(entry?.name || '').trim();
+      const sabha = String(entry?.sabha || '').trim();
+      if (!name || !sabha) return;
+      const existing = updatedKaryakars.find(k => k.name === name);
+      if (!existing || existing.sabha === sabha) return;
+      remapped.push({ name, from: existing.sabha, to: sabha });
+      updatedKaryakars = updatedKaryakars.map(k => (k.name === name ? { ...k, sabha } : k));
+    });
+
     if (addedSabhas.length > 0) {
       setSabhas(updatedSabhas);
       saveToStorage('ams_sabhas', updatedSabhas);
     }
-    if (addedKaryakars.length > 0) {
+    if (addedKaryakars.length > 0 || remapped.length > 0) {
       setKaryakars(updatedKaryakars);
       saveToStorage('ams_karyakars', updatedKaryakars);
     }
 
-    if (addedSabhas.length > 0 || addedKaryakars.length > 0) {
+    // Move the balaks who follow a remapped karyakar. Restricted to those still
+    // sitting in that karyakar's OLD sabha: anyone already elsewhere is an
+    // inconsistency this import has no basis to resolve, so leave them be.
+    let movedParticipants = 0;
+    if (cascadeParticipants && remapped.length > 0) {
+      const moves = new Map(remapped.map(r => [r.name, r]));
+      const touched = [];
+      const nextParticipants = participants.map(p => {
+        if (p.status !== 'approved' && p.status !== 'pending') return p;
+        const move = moves.get(p.karyakar);
+        if (!move || p.sabha !== move.from) return p;
+        const updated = { ...p, sabha: move.to };
+        touched.push(updated);
+        return updated;
+      });
+
+      if (touched.length > 0) {
+        movedParticipants = touched.length;
+        setParticipants(nextParticipants);
+        if (isCloudMode) {
+          // Only the touched rows — never a full-table reconcile, which would
+          // prune participants this device has not received yet.
+          localStorage.setItem('ams_participants', JSON.stringify(nextParticipants));
+          upsertRows('ams_participants', touched)
+            .then(() => setCloudStatus('online'))
+            .catch(err => {
+              console.error('Cascade update failed:', err);
+              setCloudStatus('error');
+            });
+        } else {
+          saveToStorage('ams_participants', nextParticipants);
+        }
+      }
+    }
+
+    if (addedSabhas.length > 0 || addedKaryakars.length > 0 || remapped.length > 0) {
       addAuditLog(
         'Add Import Lookups',
-        `Created ${addedSabhas.length} sabha(s) and ${addedKaryakars.length} karyakar(s) referenced by an imported roster.` +
+        `Created ${addedSabhas.length} sabha(s) and ${addedKaryakars.length} karyakar(s), remapped ${remapped.length}.` +
         (addedSabhas.length ? ` Sabhas: ${addedSabhas.join(', ')}.` : '') +
-        (addedKaryakars.length ? ` Karyakars: ${addedKaryakars.map(k => `${k.name} → ${k.sabha}`).join(', ')}.` : '')
+        (addedKaryakars.length ? ` Karyakars: ${addedKaryakars.map(k => `${k.name} → ${k.sabha}`).join(', ')}.` : '') +
+        (remapped.length ? ` Remapped: ${remapped.map(r => `${r.name} ${r.from} → ${r.to}`).join(', ')}.` : '') +
+        (movedParticipants ? ` Moved ${movedParticipants} participant(s) to follow their karyakar.` : '')
       );
     }
 
-    return { addedSabhas, addedKaryakars };
+    return { addedSabhas, addedKaryakars, remapped, movedParticipants };
   };
 
   // Register or insert spreadsheet imports (Admin only, per decision D4)
@@ -895,25 +953,59 @@ export const DbProvider = ({ children }) => {
     return { participant: newP, event, attendance: record, syncPromise };
   };
 
+  // The only participant fields an editor may change. Everything else is
+  // either identity (id, createdAt) or lifecycle state owned by
+  // setParticipantStatus / mergeParticipants — editing those here would
+  // bypass the audit trail those actions write.
+  const EDITABLE_PARTICIPANT_FIELDS = ['name', 'phone', 'sabha', 'karyakar', 'guardianDetails'];
+
   // Administrative Participant Update (Coordinator+, per decision D4)
   const updateParticipant = (participantId, updatedFields) => {
     if (!hasPermission(ROLES.COORDINATOR)) {
-      return { error: 'Only coordinators or admins can edit master data.' };
+      return { success: false, message: 'Only coordinators or admins can edit master data.' };
     }
-    const updatedList = participants.map(p => {
-      if (p.id === participantId) {
-        return { ...p, ...updatedFields };
-      }
-      return p;
-    });
-    setParticipants(updatedList);
-    saveToStorage('ams_participants', updatedList);
-
     const original = participants.find(p => p.id === participantId);
+    if (!original) return { success: false, message: 'Participant not found.' };
+
+    // Whitelist rather than spreading whatever the caller passed
+    const changes = {};
+    EDITABLE_PARTICIPANT_FIELDS.forEach(field => {
+      if (!(field in updatedFields)) return;
+      const value = field === 'phone'
+        ? normalizePhone(updatedFields.phone)
+        : String(updatedFields[field] ?? '').trim();
+      if (value !== original[field]) changes[field] = value;
+    });
+
+    const changedFields = Object.keys(changes);
+    if (changedFields.length === 0) return { success: true, unchanged: true };
+
+    const updatedRecord = { ...original, ...changes };
+    const updatedList = participants.map(p => (p.id === participantId ? updatedRecord : p));
+    setParticipants(updatedList);
+
+    if (isCloudMode) {
+      // Write just this row. saveToStorage would reconcile the whole table and
+      // prune any cloud participant missing from this device's copy, so two
+      // coordinators editing from stale tabs could delete each other's people.
+      localStorage.setItem('ams_participants', JSON.stringify(updatedList));
+      upsertRows('ams_participants', [updatedRecord])
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Participant update failed:', err);
+          setCloudStatus('error');
+          refreshFromCloud('ams_participants', rows => setParticipants(migrateParticipantsList(rows)));
+        });
+    } else {
+      saveToStorage('ams_participants', updatedList);
+    }
+
     addAuditLog(
       'Admin Participant Update',
-      `Edited details for ${original.name} (${participantId}).`
+      `Edited ${original.name} (${participantId}): ` +
+      changedFields.map(f => `${f} "${original[f] ?? ''}" → "${changes[f]}"`).join(', ') + '.'
     );
+    return { success: true, changedFields };
   };
 
   // --- Participant lifecycle actions (Coordinator+, per decision D4) ---

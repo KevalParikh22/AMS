@@ -59,6 +59,17 @@ To revoke access after the event you have two options in **Admin Control**:
 
 One caveat on Remove in cloud mode: deleting the underlying Supabase login needs the service-role key, which must never ship in a browser, so **the auth user survives**. That grants nothing on its own — without a profile row every policy refuses them — but it does keep the email address reserved. To reuse that address, also delete it under **Authentication → Users** in the dashboard.
 
+### Bulk-loading the karyakar list
+
+**Admin Control → Manage Karyakars → Import mapping from a sheet** takes two columns, `Karyakar Name` and `Mandal-Sabha` (header names are matched loosely). The **Sample** button generates that file from your current mapping, so it doubles as an export.
+
+Nothing is saved until you confirm the preview, which lists new karyakars, any sabha that would be created (check these for typos — a misspelling becomes a real entry in every dropdown), and any existing karyakar whose sabha would change.
+
+Two opt-in checkboxes appear when a karyakar's sabha would change:
+
+- **Move the karyakar** — updates the lookup mapping only.
+- **Move the balaks under them** — also rewrites those participants' sabha. Only participants still sitting in that karyakar's *old* sabha are moved; anyone already elsewhere is left alone, and archived/rejected records are never touched. Off by default, since it edits participant records rather than the lookup list.
+
 ## 5. Connect the app
 
 1. Dashboard → **Project Settings → API**. Copy the **Project URL** and the **anon public** key.

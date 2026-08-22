@@ -3,6 +3,7 @@ import { useDb } from '../context/DbContext';
 import { useAuth } from '../context/AuthContext';
 import QrCode from '../components/QrCode';
 import Modal from '../components/Modal';
+import ParticipantEditModal from '../components/ParticipantEditModal';
 import * as XLSX from 'xlsx';
 import {
   Download,
@@ -13,7 +14,8 @@ import {
   UserCheck,
   Link as LinkIcon,
   AlertCircle,
-  Printer
+  Printer,
+  Pencil
 } from 'lucide-react';
 
 export default function Reports() {
@@ -140,6 +142,7 @@ export default function Reports() {
   const [archiveSearch, setArchiveSearch] = useState('');
   const [showBadgeSheet, setShowBadgeSheet] = useState(false);
   const [rosterVisible, setRosterVisible] = useState(50);
+  const [editingParticipant, setEditingParticipant] = useState(null);
 
   // Sabha-wise attendance summary across events (Phase 0 decision D8).
   // Draft events are excluded; expected = members x relevant events.
@@ -519,6 +522,7 @@ export default function Reports() {
                     <th>Mandal-Sabha</th>
                     <th>Karyakar</th>
                     <th>Attendance Status</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -547,11 +551,21 @@ export default function Reports() {
                           {row.present ? 'Present' : 'Absent'}
                         </span>
                       </td>
+                      <td>
+                        <button
+                          onClick={() => setEditingParticipant(participants.find(p => p.id === row.id) || row)}
+                          className="btn btn-ghost"
+                          style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}
+                          title="Edit this participant's details"
+                        >
+                          <Pencil size={13} />
+                        </button>
+                      </td>
                     </tr>
                   ))}
                   {reportRoster.length > rosterVisible && (
                     <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', padding: '0.75rem' }}>
+                      <td colSpan={7} style={{ textAlign: 'center', padding: '0.75rem' }}>
                         <button onClick={() => setRosterVisible(v => v + 50)} className="btn btn-secondary" style={{ padding: '0.5rem 1.5rem', fontSize: '0.85rem' }}>
                           Show more ({reportRoster.length - rosterVisible} remaining)
                         </button>
@@ -560,7 +574,7 @@ export default function Reports() {
                   )}
                   {reportRoster.length === 0 && (
                     <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                      <td colSpan={7} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
                         No records match the current filter selection.
                       </td>
                     </tr>
@@ -632,6 +646,11 @@ export default function Reports() {
           </div>
         </div>
       )}
+
+      <ParticipantEditModal
+        participant={editingParticipant}
+        onClose={() => setEditingParticipant(null)}
+      />
 
       {/* Printable QR Badge Sheet overlay */}
       <Modal
@@ -884,6 +903,15 @@ export default function Reports() {
 
                     {/* Actions Panel */}
                     <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <button
+                        onClick={() => setEditingParticipant(p)}
+                        className="btn btn-secondary"
+                        style={{ padding: '0.45rem 0.75rem', fontSize: '0.8rem' }}
+                        title="Correct their details before approving"
+                      >
+                        <Pencil size={14} />
+                        <span>Edit</span>
+                      </button>
                       <button
                         onClick={() => handleApproveRegistration(p.id)}
                         className="btn btn-secondary"
