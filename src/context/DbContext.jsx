@@ -953,25 +953,59 @@ export const DbProvider = ({ children }) => {
     return { participant: newP, event, attendance: record, syncPromise };
   };
 
+  // The only participant fields an editor may change. Everything else is
+  // either identity (id, createdAt) or lifecycle state owned by
+  // setParticipantStatus / mergeParticipants — editing those here would
+  // bypass the audit trail those actions write.
+  const EDITABLE_PARTICIPANT_FIELDS = ['name', 'phone', 'sabha', 'karyakar', 'guardianDetails'];
+
   // Administrative Participant Update (Coordinator+, per decision D4)
   const updateParticipant = (participantId, updatedFields) => {
     if (!hasPermission(ROLES.COORDINATOR)) {
-      return { error: 'Only coordinators or admins can edit master data.' };
+      return { success: false, message: 'Only coordinators or admins can edit master data.' };
     }
-    const updatedList = participants.map(p => {
-      if (p.id === participantId) {
-        return { ...p, ...updatedFields };
-      }
-      return p;
-    });
-    setParticipants(updatedList);
-    saveToStorage('ams_participants', updatedList);
-
     const original = participants.find(p => p.id === participantId);
+    if (!original) return { success: false, message: 'Participant not found.' };
+
+    // Whitelist rather than spreading whatever the caller passed
+    const changes = {};
+    EDITABLE_PARTICIPANT_FIELDS.forEach(field => {
+      if (!(field in updatedFields)) return;
+      const value = field === 'phone'
+        ? normalizePhone(updatedFields.phone)
+        : String(updatedFields[field] ?? '').trim();
+      if (value !== original[field]) changes[field] = value;
+    });
+
+    const changedFields = Object.keys(changes);
+    if (changedFields.length === 0) return { success: true, unchanged: true };
+
+    const updatedRecord = { ...original, ...changes };
+    const updatedList = participants.map(p => (p.id === participantId ? updatedRecord : p));
+    setParticipants(updatedList);
+
+    if (isCloudMode) {
+      // Write just this row. saveToStorage would reconcile the whole table and
+      // prune any cloud participant missing from this device's copy, so two
+      // coordinators editing from stale tabs could delete each other's people.
+      localStorage.setItem('ams_participants', JSON.stringify(updatedList));
+      upsertRows('ams_participants', [updatedRecord])
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Participant update failed:', err);
+          setCloudStatus('error');
+          refreshFromCloud('ams_participants', rows => setParticipants(migrateParticipantsList(rows)));
+        });
+    } else {
+      saveToStorage('ams_participants', updatedList);
+    }
+
     addAuditLog(
       'Admin Participant Update',
-      `Edited details for ${original.name} (${participantId}).`
+      `Edited ${original.name} (${participantId}): ` +
+      changedFields.map(f => `${f} "${original[f] ?? ''}" → "${changes[f]}"`).join(', ') + '.'
     );
+    return { success: true, changedFields };
   };
 
   // --- Participant lifecycle actions (Coordinator+, per decision D4) ---
