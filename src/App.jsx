@@ -13,6 +13,7 @@ import ExcelImport from './views/ExcelImport';
 import EventManagement from './views/EventManagement';
 import SharedRegistration from './views/SharedRegistration';
 import Reports from './views/Reports';
+import BalakDirectory from './views/BalakDirectory';
 import AdminSettings from './views/AdminSettings';
 
 function AppContent() {
@@ -65,6 +66,8 @@ function AppContent() {
         return <ExcelImport />;
       case 'events':
         return <EventManagement />;
+      case 'balaks':
+        return <BalakDirectory />;
       case 'reports':
         return <Reports />;
       case 'admin':
