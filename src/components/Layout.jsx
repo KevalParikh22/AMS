@@ -4,7 +4,8 @@ import { useLang, LanguageSwitcher } from '../i18n/LanguageContext';
 import { 
   LayoutDashboard, 
   ClipboardCheck, 
-  UserPlus, 
+  UserPlus,
+  Users, 
   FileSpreadsheet, 
   Calendar, 
   BarChart3, 
@@ -24,6 +25,7 @@ export default function Layout({ children, currentView, setView }) {
     { id: 'dashboard', name: t('nav.dashboard'), icon: LayoutDashboard, requiredRole: null },
     { id: 'attendance', name: t('nav.attendance'), icon: ClipboardCheck, requiredRole: null },
     { id: 'registration', name: t('nav.registration'), icon: UserPlus, requiredRole: 'Registration Volunteer' },
+    { id: 'balaks', name: t('nav.balaks'), icon: Users, requiredRole: 'Coordinator' },
     { id: 'import', name: t('nav.import'), icon: FileSpreadsheet, requiredRole: 'Admin' },
     { id: 'events', name: t('nav.events'), icon: Calendar, requiredRole: 'Coordinator' },
     { id: 'reports', name: t('nav.reports'), icon: BarChart3, requiredRole: 'Coordinator' },
