@@ -688,18 +688,75 @@ export const DbProvider = ({ children }) => {
     let rejected = 0;
     let review = 0;
     let duplicates = 0;
+    let idNotFound = 0;
     const newParticipantsList = [...participants];
     const seenKeysInFile = new Set();
+    const seenIdsInFile = new Set();
     // Exactly the rows this import creates or changes — the only ones that
     // need writing. Anything untouched must be left alone in the cloud.
     const touchedRows = [];
 
     parsedRows.forEach(row => {
       const name = String(row.name || '').trim();
-      const guardianDetails = String(row.guardianDetails || '').trim();
+      // A masked export writes the literal "Restricted" into this column for a
+      // user who may not see guardian details. Re-importing that would destroy
+      // the real contact, so treat it as an empty cell.
+      const rawGuardian = String(row.guardianDetails || '').trim();
+      const guardianDetails = rawGuardian === 'Restricted' ? '' : rawGuardian;
       // Rosters carry the guardian's number in the free-text guardian column;
       // an explicit phone value still wins if the sheet supplies one.
       const phone = normalizePhone(row.phone) || extractGuardianPhone(guardianDetails);
+      const sheetId = String(row.id || '').trim();
+
+      // --- ID-keyed edit -------------------------------------------------
+      //
+      // The whole point of the round trip. Identity is normally name + guardian
+      // number, so correcting either in a sheet changes the key and the row
+      // lands as a NEW person. An explicit id says "this is that record" and
+      // makes a bulk rename or number fix possible at all.
+      if (sheetId) {
+        if (seenIdsInFile.has(sheetId)) {
+          duplicates++;
+          return;
+        }
+        seenIdsInFile.add(sheetId);
+
+        const idx = newParticipantsList.findIndex(p => p.id === sheetId);
+        if (idx === -1) {
+          // Never invent a person from an id that matches nothing — a stale or
+          // mistyped id would silently create a duplicate of someone real.
+          idNotFound++;
+          return;
+        }
+        if (!name) {
+          rejected++;
+          return;
+        }
+
+        const existing = newParticipantsList[idx];
+        const merged = {
+          ...existing,
+          name,
+          // A blank cell means "leave this alone", never "clear it".
+          phone: phone || existing.phone,
+          sabha: row.sabha || existing.sabha,
+          karyakar: row.karyakar || existing.karyakar,
+          guardianDetails: guardianDetails || existing.guardianDetails
+        };
+        const isSame = merged.name === existing.name &&
+          merged.phone === existing.phone &&
+          merged.sabha === existing.sabha &&
+          merged.karyakar === existing.karyakar &&
+          merged.guardianDetails === existing.guardianDetails;
+        if (isSame) {
+          unchanged++;
+        } else {
+          newParticipantsList[idx] = merged;
+          touchedRows.push(merged);
+          updated++;
+        }
+        return;
+      }
 
       if (!name) {
         rejected++;
@@ -780,17 +837,23 @@ export const DbProvider = ({ children }) => {
     });
 
     setParticipants(newParticipantsList);
+    let syncPromise;
     if (isCloudMode) {
       // Only the rows this import actually created or changed. A full-table
       // reconcile would delete every cloud participant absent from the file —
       // catastrophic if the roster had not loaded, and wrong even when it had,
       // since an import is not a declaration of the entire registry.
       localStorage.setItem('ams_participants', JSON.stringify(newParticipantsList));
-      trackWrite('ams_participants', upsertRows('ams_participants', touchedRows))
+      // Returned so the caller can report a failure. This used to be swallowed
+      // into console.error, so the summary could claim "48 updated" when not one
+      // row had reached Supabase.
+      syncPromise = trackWrite('ams_participants', upsertRows('ams_participants', touchedRows))
         .then(() => setCloudStatus('online'))
         .catch(err => {
           console.error('Import sync failed:', err);
           setCloudStatus('error');
+          refreshFromCloud('ams_participants', rows => setParticipants(migrateParticipantsList(rows)));
+          throw new Error('The import did not reach the server — check the connection and run it again.');
         });
     } else {
       saveToStorage('ams_participants', newParticipantsList);
@@ -799,10 +862,11 @@ export const DbProvider = ({ children }) => {
     // Audit Log
     addAuditLog(
       'Excel Master Import',
-      `Imported raw sheet data. Created ${inserted} new, updated ${updated}, ${unchanged} unchanged, ${review} routed to review (no phone), ${duplicates} duplicate rows skipped, ${rejected} rejected.`
+      `Imported raw sheet data. Created ${inserted} new, updated ${updated}, ${unchanged} unchanged, ${review} routed to review (no phone), ${duplicates} duplicate rows skipped, ${rejected} rejected` +
+      (idNotFound ? `, ${idNotFound} rejected for an unknown participant ID` : '') + '.'
     );
 
-    return { inserted, updated, unchanged, rejected, review, duplicates };
+    return { inserted, updated, unchanged, rejected, review, duplicates, idNotFound, syncPromise };
   };
 
   // Events API (Coordinator+, per decision D4)

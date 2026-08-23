@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useDb } from '../context/DbContext';
 import { extractGuardianPhone, normalizePhone, participantKey } from '../lib/participantIdentity';
+import { autoMapHeaders } from '../lib/columnMapping';
 import * as XLSX from 'xlsx';
 import {
   UploadCloud,
@@ -17,6 +18,10 @@ import {
 // participant number; if mapped it wins, otherwise the number is read out of
 // the guardian text.
 const REQUIRED_FIELDS = {
+  // Listed first so the auto-mapper claims "Participant ID" before the loose
+  // 'name'/'phone' synonyms can match a header that merely contains them.
+  // Optional: a sheet without it behaves exactly as before.
+  id: { label: 'Participant ID (for edits)', required: false, synonyms: ['participant id', 'reference id', 'attendee id', 'balak id'] },
   name: { label: 'Participant Name', required: true, synonyms: ['name', 'full name', 'balak name', 'candidate'] },
   guardianDetails: { label: 'Guardian Name & Contact', required: true, synonyms: ['guardian', 'parent', 'guardian contact details', 'father', 'mother'] },
   sabha: { label: 'Mandal / Sabha', required: false, synonyms: ['sabha', 'mandal', 'mandal-sabha', 'class', 'group'] },
@@ -134,19 +139,8 @@ export default function ExcelImport() {
         setHeaders(sheetHeaders);
         setRawRows(sheetRows);
         
-        // Auto-match headers to fields based on synonyms
-        const initialMappings = {};
-        Object.entries(REQUIRED_FIELDS).forEach(([fieldKey, config]) => {
-          const matchedHeaderIdx = sheetHeaders.findIndex(header => 
-            config.synonyms.some(syn => header.toLowerCase().includes(syn.toLowerCase()))
-          );
-          if (matchedHeaderIdx > -1) {
-            initialMappings[fieldKey] = matchedHeaderIdx;
-          } else {
-            initialMappings[fieldKey] = -1; // Unmapped
-          }
-        });
-        
+        const initialMappings = autoMapHeaders(sheetHeaders, REQUIRED_FIELDS);
+
         setMappings(initialMappings);
         generatePreview(sheetRows, initialMappings);
       } catch (err) {
@@ -160,7 +154,8 @@ export default function ExcelImport() {
   // Analyze ALL rows so duplicates/ambiguities are identified before import (FR-1)
   const generatePreview = (rows, currentMappings) => {
     const seenPhones = new Set();
-    const stats = { new: 0, update: 0, unchanged: 0, review: 0, duplicate: 0, rejected: 0 };
+    const seenIds = new Set();
+    const stats = { new: 0, update: 0, unchanged: 0, review: 0, duplicate: 0, rejected: 0, idNotFound: 0 };
 
     // Lookup consistency, collected in the same pass
     const unknownSabhas = new Map();
@@ -178,13 +173,45 @@ export default function ExcelImport() {
       });
 
       // Resolve the contact number the same way importExcelData will
+      if (parsedRow.guardianDetails === 'Restricted') parsedRow.guardianDetails = '';
       const contactPhone = normalizePhone(parsedRow.phone) || extractGuardianPhone(parsedRow.guardianDetails);
       parsedRow.contactPhone = contactPhone;
       const rowKey = participantKey(parsedRow.name, contactPhone);
+      const sheetId = String(parsedRow.id || '').trim();
 
       // Determine what the importer will do with this row
       let status = 'new';
       let note = 'New participant';
+
+      // Mirrors the ID branch in importExcelData — the two classifications must
+      // agree or the preview lies about what the import will do.
+      if (sheetId) {
+        const existing = participants.find(p => p.id === sheetId);
+        if (seenIds.has(sheetId)) {
+          status = 'duplicate';
+          note = `Participant ID ${sheetId} appears more than once in this file — row will be skipped`;
+        } else if (!existing) {
+          status = 'idNotFound';
+          note = `No participant has ID ${sheetId} — row will be rejected, not created`;
+        } else if (!parsedRow.name) {
+          status = 'rejected';
+          note = 'Missing name — row will be rejected';
+        } else {
+          const isSame = parsedRow.name === existing.name &&
+            (contactPhone || existing.phone) === existing.phone &&
+            (parsedRow.sabha || existing.sabha) === existing.sabha &&
+            (parsedRow.karyakar || existing.karyakar) === existing.karyakar &&
+            (parsedRow.guardianDetails || existing.guardianDetails) === existing.guardianDetails;
+          status = isSame ? 'unchanged' : 'update';
+          note = isSame
+            ? `Identical to ${existing.id} (${existing.name}) — no change`
+            : `Will update ${existing.id} (${existing.name}) by ID`;
+        }
+        seenIds.add(sheetId);
+        stats[status]++;
+        return { id: rowIdx, data: parsedRow, status, note, lookupWarnings: [] };
+      }
+
       if (!parsedRow.name) {
         status = 'rejected';
         note = 'Missing name — row will be rejected';
@@ -304,6 +331,8 @@ export default function ExcelImport() {
       return;
     }
     setImportSummary(summary);
+    // In cloud mode the import is only real once the rows reach Supabase.
+    summary.syncPromise?.catch(err => setErrorMsg(err.message));
     
     // Reset state
     setFile(null);
@@ -411,6 +440,9 @@ export default function ExcelImport() {
             <li>👁️ Sent to Review (no contact no.): <strong>{importSummary.review}</strong></li>
             <li>📑 Duplicate Rows Skipped: <strong>{importSummary.duplicates}</strong></li>
             <li>⚠️ Rejected: <strong>{importSummary.rejected}</strong></li>
+            {importSummary.idNotFound > 0 && (
+              <li>🚫 Unknown Participant ID (not created): <strong>{importSummary.idNotFound}</strong></li>
+            )}
           </ul>
         </div>
       )}
@@ -511,6 +543,9 @@ export default function ExcelImport() {
               <span className="badge badge-warning">To Review (no contact no.): {previewStats.review}</span>
               <span className="badge badge-warning">Duplicates in file: {previewStats.duplicate}</span>
               <span className="badge badge-danger">Rejected: {previewStats.rejected}</span>
+              {previewStats.idNotFound > 0 && (
+                <span className="badge badge-danger">Unknown ID: {previewStats.idNotFound}</span>
+              )}
             </div>
           )}
 
