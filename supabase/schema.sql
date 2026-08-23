@@ -70,8 +70,12 @@ $$;
 
 -- ---------- Domain tables (columns mirror the app's camelCase fields) ----------
 create table if not exists public.sabhas (
-  name text primary key
+  name text primary key,
+  -- Areas roll several mandals up into one reporting group. Added after the
+  -- table shipped, so existing deployments pick it up via the alter below.
+  area text not null default 'Unassigned'
 );
+alter table public.sabhas add column if not exists area text not null default 'Unassigned';
 
 create table if not exists public.karyakars (
   name text primary key,
@@ -226,13 +230,13 @@ create policy audit_read on public.audit_logs
   for select using (public.has_permission('Coordinator'));
 
 -- ---------- Seed lookup data (matches the app's factory defaults) ----------
-insert into public.sabhas (name) values
-  ('Bal Sabha - Sub-group A1'),
-  ('Bal Sabha - Sub-group A2'),
-  ('Bal Sabha - Sub-group B1'),
-  ('Kishore Mandal - East Wing'),
-  ('Kishore Mandal - West Wing'),
-  ('Yuva Mandal - Youth')
+insert into public.sabhas (name, area) values
+  ('Bal Sabha - Sub-group A1', 'North Zone'),
+  ('Bal Sabha - Sub-group A2', 'North Zone'),
+  ('Bal Sabha - Sub-group B1', 'South Zone'),
+  ('Kishore Mandal - East Wing', 'East Zone'),
+  ('Kishore Mandal - West Wing', 'West Zone'),
+  ('Yuva Mandal - Youth', 'North Zone')
 on conflict (name) do nothing;
 
 insert into public.karyakars (name, sabha) values

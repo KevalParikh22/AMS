@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useDb } from '../context/DbContext';
 import { useAuth } from '../context/AuthContext';
 import QrCode from '../components/QrCode';
 import Modal from '../components/Modal';
 import ParticipantEditModal from '../components/ParticipantEditModal';
-import { participantKey } from '../lib/participantIdentity';
+import { participantKey, sabhaNameKey } from '../lib/participantIdentity';
 import * as XLSX from 'xlsx';
 import {
   Download,
@@ -25,6 +25,9 @@ export default function Reports() {
     participants,
     attendance,
     markPresent,
+    undoAttendance,
+    getEffectiveStatus,
+    areaOfSabha,
     approveParticipant,
     rejectParticipant,
     linkParticipant,
@@ -34,14 +37,29 @@ export default function Reports() {
     addAuditLog
   } = useDb();
 
-  const { user, canViewGuardianDetails } = useAuth();
+  const { user, canViewGuardianDetails, hasPermission } = useAuth();
 
   // Filters state
   const [selectedEventId, setSelectedEventId] = useState(events[0]?.id || '');
   const [selectedSabha, setSelectedSabha] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
-  const [activeTab, setActiveTab] = useState('attendance'); // 'attendance' | 'sabha-summary' | 'pending-review'
+  const [activeTab, setActiveTab] = useState('attendance'); // 'attendance' | 'multi-day' | 'sabha-summary' | 'data-quality' | 'pending-review'
+
+  // Multi-day report: which events are combined, and the minimum days filter
+  const [multiEventIds, setMultiEventIds] = useState([]);
+  const [minDaysFilter, setMinDaysFilter] = useState(0);
+
+  // The initial useState above reads `events` on the first render only, which in
+  // cloud mode is before anything has loaded — so it settled on '' and never
+  // recovered, leaving the picker blank. Adopt the first event once they arrive,
+  // and recover if the selected event disappears.
+  useEffect(() => {
+    if (events.length === 0) return;
+    if (!events.some(e => e.id === selectedEventId)) {
+      setSelectedEventId(events[0].id);
+    }
+  }, [events, selectedEventId]);
 
   // Get active event details
   const activeEvent = events.find(e => e.id === selectedEventId);
@@ -110,6 +128,74 @@ export default function Reports() {
   // Counted separately so Present never silently disagrees with the raw count.
   const orphanedMarks = presentIds.size - presentOnRoster - unexpectedPresent.length;
 
+  // --- Multi-day combined report ---
+  //
+  // A shibir run as three one-day events is three rows in `events`, so no single
+  // report can answer "who came all three days". Rather than adding a series
+  // field to events, any set of events can be ticked and combined — which also
+  // works retroactively on events that already happened.
+  const combinableEvents = [...events]
+    .filter(e => e.status !== 'Draft')
+    .sort((a, b) => `${a.date}${a.startTime || ''}`.localeCompare(`${b.date}${b.startTime || ''}`));
+
+  const multiEvents = combinableEvents.filter(e => multiEventIds.includes(e.id));
+
+  // One pass over attendance rather than one filter per event.
+  const presentByEvent = new Map(multiEvents.map(e => [e.id, new Set()]));
+  attendance.forEach(a => {
+    const set = presentByEvent.get(a.eventId);
+    if (set) set.add(a.participantId);
+  });
+
+  // The per-event form of `isExpected` above. Scope varies between events, so
+  // this has to be asked per (participant, event) rather than once.
+  const isExpectedFor = (p, event) => {
+    if (p.status !== 'approved') return false;
+    if (event.sabhaMandalScope !== 'All Sabhas' && p.sabha !== event.sabhaMandalScope) return false;
+    return true;
+  };
+
+  const multiRoster = participants
+    .map(p => {
+      const cells = multiEvents.map(e => {
+        const inScope = isExpectedFor(p, e);
+        const present = presentByEvent.get(e.id).has(p.id);
+        // Someone marked present outside the event's scope still attended, so
+        // the day counts for them — flagged, not discarded.
+        if (present) return { state: 'present', offRoster: !inScope };
+        return { state: inScope ? 'absent' : 'na', offRoster: false };
+      });
+      const daysAttended = cells.filter(c => c.state === 'present').length;
+      // Denominator is days this person was actually expected on, not the raw
+      // event count — otherwise a mandal out of scope on day 2 reads as absent.
+      const daysApplicable = cells.filter(c => c.state !== 'na').length;
+      return {
+        ...p,
+        cells,
+        daysAttended,
+        daysApplicable,
+        percentage: daysApplicable > 0 ? Math.round((daysAttended / daysApplicable) * 100) : 0
+      };
+    })
+    // Anyone with no connection to any selected event is simply not in this report.
+    .filter(row => row.daysApplicable > 0);
+
+  // Untick an event while "at least 3 days" is selected and the filter would
+  // silently match nobody, which reads as "no data" rather than "bad filter".
+  const effectiveMinDays = Math.min(minDaysFilter, multiEvents.length);
+
+  const multiVisible = multiRoster
+    .filter(matchesView)
+    .filter(row => row.daysAttended >= effectiveMinDays)
+    .sort((a, b) => b.daysAttended - a.daysAttended || a.name.localeCompare(b.name));
+
+  // How many people attended each possible number of days: the "who came all
+  // three days" answer, and its tail.
+  const dayDistribution = multiEvents.map((_, i) => i + 1)
+    .concat(0)
+    .sort((a, b) => b - a)
+    .map(n => ({ days: n, count: multiRoster.filter(r => r.daysAttended === n).length }));
+
   // Pending public registrations list
   const pendingRegistrations = participants.filter(p => p.status === 'pending');
 
@@ -120,7 +206,10 @@ export default function Reports() {
     activeParticipants.forEach(p => {
       const keys = [];
       if (p.phone) keys.push('phone:' + p.phone.trim());
-      keys.push('name:' + p.name.toLowerCase().trim());
+      // Name + mandal, not name alone. A shared name across two different
+      // mandals is two different balaks, and flagging those buried the real
+      // duplicates under false ones.
+      keys.push('sabhaname:' + sabhaNameKey(p.sabha, p.name));
       keys.forEach(key => {
         if (!byKey.has(key)) byKey.set(key, []);
         byKey.get(key).push(p);
@@ -164,6 +253,9 @@ export default function Reports() {
       const expected = members.length * relevantEvents.length;
       return {
         sabha: sabhaName,
+        // A participant's sabha is free text and need not be in the lookup at
+        // all, so an unmapped mandal falls back rather than dropping out.
+        area: areaOfSabha(sabhaName),
         members: members.length,
         eventCount: relevantEvents.length,
         presentMarks,
@@ -172,20 +264,50 @@ export default function Reports() {
       };
     });
 
+  // Areas roll several mandals into one group. Summing the sabha rows rather
+  // than recomputing keeps the two tables incapable of disagreeing.
+  const areaSummary = [...new Set(sabhaSummary.map(r => r.area))]
+    .sort()
+    .map(area => {
+      const rows = sabhaSummary.filter(r => r.area === area);
+      const members = rows.reduce((s, r) => s + r.members, 0);
+      const presentMarks = rows.reduce((s, r) => s + r.presentMarks, 0);
+      const expected = rows.reduce((s, r) => s + r.expected, 0);
+      return {
+        area,
+        sabhaCount: rows.length,
+        members,
+        presentMarks,
+        expected,
+        percentage: expected > 0 ? Math.round((presentMarks / expected) * 100) : 0
+      };
+    });
+
+  // One row shape for all three places that emit the sabha summary, so an added
+  // column can never reach some of them and not the others.
+  const sabhaSummaryRows = () => sabhaSummary.map(row => ({
+    'Area': row.area,
+    'Mandal/Sabha': row.sabha,
+    'Participants': row.members,
+    'Events Held': row.eventCount,
+    'Present Marks': row.presentMarks,
+    'Expected Marks': row.expected,
+    'Attendance %': `${row.percentage}%`
+  }));
+
   const handleExportSabhaSummary = () => {
-    const dataToExport = sabhaSummary.map(row => ({
-      'Mandal/Sabha': row.sabha,
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sabhaSummaryRows()), 'Sabha Summary');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(areaSummary.map(row => ({
+      'Area': row.area,
+      'Mandals': row.sabhaCount,
       'Participants': row.members,
-      'Events Held': row.eventCount,
       'Present Marks': row.presentMarks,
       'Expected Marks': row.expected,
       'Attendance %': `${row.percentage}%`
-    }));
-    const ws = XLSX.utils.json_to_sheet(dataToExport);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Sabha Summary');
+    }))), 'Area Summary');
     XLSX.writeFile(wb, 'Sabha_Attendance_Summary.xlsx');
-    addAuditLog('Export Report', 'Exported sabha-wise attendance summary to Excel.');
+    addAuditLog('Export Report', 'Exported sabha-wise and area-wise attendance summary to Excel.');
   };
 
   // Full multi-sheet workbook: roster + sabha summary + pending queue
@@ -197,6 +319,7 @@ export default function Reports() {
       'Participant ID': row.id,
       'Full Name': row.name,
       'Contact Number': row.phone,
+      'Area': areaOfSabha(row.sabha),
       'Mandal/Sabha Class': row.sabha,
       'Responsible Karyakar': row.karyakar,
       'Guardian Contact Details': canViewGuardianDetails ? row.guardianDetails : 'Restricted',
@@ -205,15 +328,7 @@ export default function Reports() {
     })));
     XLSX.utils.book_append_sheet(wb, rosterSheet, 'Attendance Roster');
 
-    const summarySheet = XLSX.utils.json_to_sheet(sabhaSummary.map(row => ({
-      'Mandal/Sabha': row.sabha,
-      'Participants': row.members,
-      'Events Held': row.eventCount,
-      'Present Marks': row.presentMarks,
-      'Expected Marks': row.expected,
-      'Attendance %': `${row.percentage}%`
-    })));
-    XLSX.utils.book_append_sheet(wb, summarySheet, 'Sabha Summary');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sabhaSummaryRows()), 'Sabha Summary');
 
     const pendingSheet = XLSX.utils.json_to_sheet(pendingRegistrations.map(p => ({
       'Reference ID': p.id,
@@ -227,6 +342,53 @@ export default function Reports() {
 
     XLSX.writeFile(wb, `${activeEvent.name.replace(/\s+/g, '_')}_Full_Report.xlsx`);
     addAuditLog('Export Report', `Exported full multi-sheet report for event "${activeEvent.name}".`);
+  };
+
+  const handleExportMultiDay = () => {
+    if (multiEvents.length < 2) return;
+
+    // Event names go in COLUMN HEADERS, never sheet names — SheetJS caps a sheet
+    // name at 31 characters and rejects []:*?/\, and event names are free text.
+    const columnFor = (e) => `${e.name} (${e.date})`;
+    const rows = multiVisible.map(row => {
+      const record = {
+        'Participant ID': row.id,
+        'Full Name': row.name,
+        'Guardian Number': row.phone,
+        'Mandal/Sabha Class': row.sabha,
+        'Responsible Karyakar': row.karyakar,
+        'Guardian Contact Details': canViewGuardianDetails ? row.guardianDetails : 'Restricted'
+      };
+      multiEvents.forEach((e, i) => {
+        const cell = row.cells[i];
+        record[columnFor(e)] = cell.state === 'present'
+          ? (cell.offRoster ? 'Present (off-roster)' : 'Present')
+          : cell.state === 'absent' ? 'Absent' : 'Not applicable';
+      });
+      record['Days Attended'] = row.daysAttended;
+      record['Days Applicable'] = row.daysApplicable;
+      record['Attendance %'] = `${row.percentage}%`;
+      return record;
+    });
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Multi-Day Attendance');
+
+    const summary = multiEvents.map(e => ({
+      'Event': e.name,
+      'Date': e.date,
+      'Sabha Scope': e.sabhaMandalScope,
+      'Total Present': presentByEvent.get(e.id).size
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), 'Event Summary');
+
+    const first = multiEvents[0].date;
+    const last = multiEvents[multiEvents.length - 1].date;
+    XLSX.writeFile(wb, `Combined_${first}_to_${last}.xlsx`);
+    addAuditLog(
+      'Export Report',
+      `Exported combined ${multiEvents.length}-event report (${multiEvents.map(e => e.name).join(', ')}).`
+    );
   };
 
   // Handle Excel download trigger using sheetjs
@@ -274,6 +436,32 @@ export default function Reports() {
       );
     }
     setTimeout(() => setReviewMsg(null), 8000);
+  };
+
+  // --- Admin correction of a closed event's roster ---
+  //
+  // Events auto-close past their end time and an expired one can never be
+  // reopened, so a mark missed on the day would otherwise be permanent. Only an
+  // Admin sees these controls, and each change is audited under its own action.
+  const eventIsClosed = Boolean(activeEvent) && getEffectiveStatus(activeEvent) === 'Closed';
+  const canCorrectClosed = eventIsClosed && hasPermission('Admin');
+
+  const handleCorrectAttendance = (row) => {
+    if (!canCorrectClosed) return;
+    const verb = row.present ? 'Mark ABSENT' : 'Mark PRESENT';
+    if (!window.confirm(
+      `${verb}: "${row.name}" (${row.id}) for the closed event "${activeEvent.name}"?\n\n` +
+      'This event has already finished. The correction is recorded in the audit log against your name.'
+    )) return;
+
+    const result = row.present
+      ? undoAttendance(activeEvent.id, row.id, { allowClosed: true })
+      : markPresent(activeEvent.id, row.id, { allowClosed: true });
+
+    reportReview(
+      result,
+      `${row.name} is now marked ${row.present ? 'absent' : 'present'} for ${activeEvent.name}.`
+    );
   };
 
   const handleApproveRegistration = (pId) => {
@@ -341,6 +529,21 @@ export default function Reports() {
           }}
         >
           Attendance Roster Reports
+        </button>
+        <button
+          onClick={() => setActiveTab('multi-day')}
+          style={{
+            background: 'none',
+            border: 'none',
+            borderBottom: activeTab === 'multi-day' ? '2px solid var(--accent)' : 'none',
+            color: activeTab === 'multi-day' ? 'var(--accent)' : 'var(--text-secondary)',
+            padding: '0.75rem 1.5rem',
+            cursor: 'pointer',
+            fontSize: '1rem',
+            fontWeight: 600
+          }}
+        >
+          Multi-Day Combined
         </button>
         <button
           onClick={() => setActiveTab('sabha-summary')}
@@ -521,6 +724,37 @@ export default function Reports() {
 
           {/* Roster Report Table */}
           <div className="glass-panel" style={{ padding: '1rem', borderRadius: 'var(--radius-md)' }}>
+            {canCorrectClosed && (
+              <div style={{
+                marginBottom: '1rem',
+                padding: '0.75rem 1rem',
+                borderRadius: 'var(--radius-sm)',
+                backgroundColor: 'var(--warning-light, rgba(255,170,0,0.12))',
+                border: '1px solid var(--warning)',
+                color: 'var(--text-primary)',
+                fontSize: '0.85rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem'
+              }}>
+                <AlertCircle size={16} color="var(--warning)" />
+                <span>
+                  <strong>Correction mode.</strong> "{activeEvent.name}" is closed, so the desk can no
+                  longer change it. As an administrator you can still fix this roster — every change is
+                  logged against your name.
+                </span>
+              </div>
+            )}
+
+            {reviewMsg && (
+              <div
+                className={`badge ${reviewMsg.ok ? 'badge-success' : 'badge-danger'}`}
+                style={{ display: 'block', marginBottom: '1rem', padding: '0.6rem 0.9rem', fontSize: '0.85rem' }}
+              >
+                {reviewMsg.text}
+              </div>
+            )}
+
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
               <h4 style={{ fontSize: '1rem', fontWeight: 600 }}>Roster Roll-Call List</h4>
               <div style={{ display: 'flex', gap: '0.5rem' }}>
@@ -566,6 +800,7 @@ export default function Reports() {
                     <th>Mandal-Sabha</th>
                     <th>Karyakar</th>
                     <th>Attendance Status</th>
+                    {canCorrectClosed && <th>Correction</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -594,11 +829,24 @@ export default function Reports() {
                           {row.present ? 'Present' : 'Absent'}
                         </span>
                       </td>
+                      {canCorrectClosed && (
+                        <td>
+                          <button
+                            onClick={() => handleCorrectAttendance(row)}
+                            className="btn btn-ghost"
+                            style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}
+                            title={`Correct ${row.name}'s attendance for this closed event`}
+                          >
+                            {row.present ? <X size={13} /> : <Check size={13} />}
+                            <span>{row.present ? 'Mark absent' : 'Mark present'}</span>
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                   {reportRoster.length > rosterVisible && (
                     <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', padding: '0.75rem' }}>
+                      <td colSpan={canCorrectClosed ? 7 : 6} style={{ textAlign: 'center', padding: '0.75rem' }}>
                         <button onClick={() => setRosterVisible(v => v + 50)} className="btn btn-secondary" style={{ padding: '0.5rem 1.5rem', fontSize: '0.85rem' }}>
                           Show more ({reportRoster.length - rosterVisible} remaining)
                         </button>
@@ -607,7 +855,7 @@ export default function Reports() {
                   )}
                   {reportRoster.length === 0 && (
                     <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                      <td colSpan={canCorrectClosed ? 7 : 6} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
                         No records match the current filter selection.
                       </td>
                     </tr>
@@ -617,6 +865,216 @@ export default function Reports() {
             </div>
           </div>
         </>
+      )}
+
+      {/* Multi-Day Combined Report Tab */}
+      {activeTab === 'multi-day' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+
+          {/* Event picker */}
+          <div className="glass-panel" style={{ padding: '1.5rem', borderRadius: 'var(--radius-md)' }}>
+            <h3 style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '0.5rem' }}>Combine Events</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
+              A multi-day programme run as one event per day shows up here as separate events. Tick the
+              days that belong together to see who attended all of them.
+            </p>
+
+            {combinableEvents.length === 0 && (
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                No events to combine yet — only events that have left Draft can be included.
+              </p>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '0.6rem' }}>
+              {combinableEvents.map(e => {
+                const checked = multiEventIds.includes(e.id);
+                return (
+                  <label
+                    key={e.id}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer',
+                      padding: '0.6rem 0.8rem', borderRadius: 'var(--radius-sm)',
+                      border: `1px solid ${checked ? 'var(--accent)' : 'var(--border-color)'}`,
+                      backgroundColor: 'var(--bg-primary)'
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => setMultiEventIds(ids =>
+                        ids.includes(e.id) ? ids.filter(x => x !== e.id) : [...ids, e.id]
+                      )}
+                    />
+                    <span style={{ fontSize: '0.85rem' }}>
+                      <strong>{e.name}</strong>
+                      <br />
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        {e.date} · {e.sabhaMandalScope}
+                      </span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+
+            {combinableEvents.length > 0 && (
+              <div style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+                <button
+                  onClick={() => setMultiEventIds(combinableEvents.map(e => e.id))}
+                  className="btn btn-secondary"
+                  style={{ padding: '0.4rem 0.9rem', fontSize: '0.8rem' }}
+                >
+                  Select all
+                </button>
+                <button
+                  onClick={() => setMultiEventIds([])}
+                  className="btn btn-ghost"
+                  style={{ padding: '0.4rem 0.9rem', fontSize: '0.8rem' }}
+                >
+                  Clear
+                </button>
+              </div>
+            )}
+          </div>
+
+          {multiEvents.length < 2 && (
+            <div className="glass-panel" style={{ padding: '3rem', borderRadius: 'var(--radius-md)', textAlign: 'center', color: 'var(--text-muted)' }}>
+              Tick at least two events to build a combined report.
+            </div>
+          )}
+
+          {multiEvents.length >= 2 && (
+            <>
+              {/* Day distribution */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '1rem' }}>
+                {dayDistribution.map(d => (
+                  <div
+                    key={d.days}
+                    className="glass-panel"
+                    style={{
+                      padding: '1.1rem', borderRadius: 'var(--radius-md)', textAlign: 'center',
+                      borderLeft: `3px solid ${d.days === multiEvents.length ? 'var(--success)' : d.days === 0 ? 'var(--danger)' : 'var(--warning)'}`
+                    }}
+                  >
+                    <div style={{ fontSize: '1.6rem', fontWeight: 700 }}>{d.count}</div>
+                    <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                      attended {d.days} of {multiEvents.length} day{multiEvents.length === 1 ? '' : 's'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Filters */}
+              <div className="glass-panel" style={{
+                padding: '1.25rem 1.5rem', borderRadius: 'var(--radius-md)',
+                display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', alignItems: 'end'
+              }}>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Sabha Class</label>
+                  <select className="form-control" value={selectedSabha} onChange={(e) => setSelectedSabha(e.target.value)}>
+                    {uniqueSabhas.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Attended at least</label>
+                  <select className="form-control" value={effectiveMinDays} onChange={(e) => setMinDaysFilter(Number(e.target.value))}>
+                    {multiEvents.map((_, i) => (
+                      <option key={i} value={i}>{i === 0 ? 'Any number of days' : `${i} day${i === 1 ? '' : 's'}`}</option>
+                    ))}
+                    <option value={multiEvents.length}>All {multiEvents.length} days</option>
+                  </select>
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Search</label>
+                  <input
+                    type="text"
+                    className="form-control"
+                    placeholder="Name or Phone..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              {/* Matrix */}
+              <div className="glass-panel" style={{ padding: '1rem', borderRadius: 'var(--radius-md)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                  <h4 style={{ fontSize: '1rem', fontWeight: 600 }}>
+                    Combined Roster — {multiVisible.length} of {multiRoster.length} shown
+                  </h4>
+                  <button
+                    onClick={handleExportMultiDay}
+                    className="btn btn-primary"
+                    style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+                    disabled={multiVisible.length === 0}
+                  >
+                    <Download size={14} />
+                    <span>Export Combined Report</span>
+                  </button>
+                </div>
+
+                <div className="table-container">
+                  <table className="custom-table">
+                    <thead>
+                      <tr>
+                        <th>Full Name</th>
+                        <th>Mandal-Sabha</th>
+                        {multiEvents.map(e => (
+                          <th key={e.id} title={`${e.name} — ${e.sabhaMandalScope}`}>{e.date}</th>
+                        ))}
+                        <th>Days Attended</th>
+                        <th>%</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {multiVisible.map(row => (
+                        <tr key={row.id}>
+                          <td style={{ fontWeight: 600 }}>{row.name}</td>
+                          <td>{row.sabha}</td>
+                          {row.cells.map((cell, i) => (
+                            <td key={multiEvents[i].id}>
+                              {cell.state === 'na' ? (
+                                <span style={{ color: 'var(--text-muted)' }} title="Not in this event's sabha scope">—</span>
+                              ) : (
+                                <span
+                                  className={`badge ${cell.state === 'present' ? 'badge-success' : 'badge-danger'}`}
+                                  title={cell.offRoster ? "Checked in but outside this event's sabha scope" : undefined}
+                                >
+                                  {cell.state === 'present' ? (cell.offRoster ? 'Present*' : 'Present') : 'Absent'}
+                                </span>
+                              )}
+                            </td>
+                          ))}
+                          <td style={{ fontWeight: 700 }}>
+                            {row.daysAttended} / {row.daysApplicable}
+                          </td>
+                          <td>
+                            <span className={`badge ${row.percentage >= 75 ? 'badge-success' : row.percentage >= 40 ? 'badge-warning' : 'badge-danger'}`}>
+                              {row.percentage}%
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                      {multiVisible.length === 0 && (
+                        <tr>
+                          <td colSpan={multiEvents.length + 4} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                            No one matches the current filters.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.75rem' }}>
+                  <strong>—</strong> means that day did not apply to this person (their mandal was outside the
+                  event's scope), so it is excluded from their total. <strong>Present*</strong> means they were
+                  checked in on a day their mandal was not scoped for.
+                </p>
+              </div>
+            </>
+          )}
+        </div>
       )}
 
       {/* Sabha-wise Attendance Summary Tab */}
@@ -638,10 +1096,54 @@ export default function Reports() {
             Attendance percentage per sabha across all Active and Closed events in scope. Draft events are excluded.
           </p>
 
+          {/* Area rollup: the same numbers grouped a level up */}
+          <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem' }}>By Area</h4>
+          <div className="table-container" style={{ marginBottom: '2rem' }}>
+            <table className="custom-table">
+              <thead>
+                <tr>
+                  <th>Area</th>
+                  <th>Mandals</th>
+                  <th>Participants</th>
+                  <th>Present Marks</th>
+                  <th>Expected Marks</th>
+                  <th>Attendance %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {areaSummary.map((row) => (
+                  <tr key={row.area}>
+                    <td style={{ fontWeight: 600 }}>{row.area}</td>
+                    <td>{row.sabhaCount}</td>
+                    <td>{row.members}</td>
+                    <td>{row.presentMarks}</td>
+                    <td>{row.expected}</td>
+                    <td>
+                      <span className={`badge ${
+                        row.percentage >= 75 ? 'badge-success' : row.percentage >= 40 ? 'badge-warning' : 'badge-danger'
+                      }`}>
+                        {row.percentage}%
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                {areaSummary.length === 0 && (
+                  <tr>
+                    <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                      No data yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem' }}>By Mandal</h4>
           <div className="table-container">
             <table className="custom-table">
               <thead>
                 <tr>
+                  <th>Area</th>
                   <th>Mandal / Sabha</th>
                   <th>Participants</th>
                   <th>Events Held</th>
@@ -653,6 +1155,7 @@ export default function Reports() {
               <tbody>
                 {sabhaSummary.map((row) => (
                   <tr key={row.sabha}>
+                    <td style={{ color: 'var(--text-secondary)' }}>{row.area}</td>
                     <td style={{ fontWeight: 600 }}>{row.sabha}</td>
                     <td>{row.members}</td>
                     <td>{row.eventCount}</td>
@@ -669,7 +1172,7 @@ export default function Reports() {
                 ))}
                 {sabhaSummary.length === 0 && (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                    <td colSpan={7} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
                       No participant data available for summary.
                     </td>
                   </tr>
@@ -747,6 +1250,15 @@ export default function Reports() {
       {activeTab === 'data-quality' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
 
+          {reviewMsg && (
+            <div
+              className={`badge ${reviewMsg.ok ? 'badge-success' : 'badge-danger'}`}
+              style={{ display: 'block', padding: '0.6rem 0.9rem', fontSize: '0.85rem' }}
+            >
+              {reviewMsg.text}
+            </div>
+          )}
+
           {/* Possible duplicates with merge actions */}
           <div className="glass-panel" style={{ padding: '1.5rem', borderRadius: 'var(--radius-md)' }}>
             <h3 style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -754,7 +1266,10 @@ export default function Reports() {
               <span>Possible Duplicate Records</span>
             </h3>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.5rem' }}>
-              Active participants sharing a phone number or exact name. Merging moves attendance history to the record you keep and retains the other as a linked reference.
+              Active participants sharing a guardian number, or carrying the same name within the same
+              mandal. A name repeated across two different mandals is two different balaks, so it is not
+              flagged. Merging moves attendance history to the record you keep and retains the other as a
+              linked reference.
             </p>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
@@ -766,7 +1281,9 @@ export default function Reports() {
                   padding: '1.25rem'
                 }}>
                   <div style={{ fontSize: '0.8rem', color: 'var(--warning)', fontWeight: 600, marginBottom: '0.75rem' }}>
-                    Shared {group.key.startsWith('phone:') ? `phone ${group.key.slice(6)}` : `name "${group.members[0].name}"`}
+                    {group.key.startsWith('phone:')
+                      ? `Shared guardian number ${group.key.slice(6)} — may be siblings`
+                      : `Same name "${group.members[0].name}" in the same mandal (${group.members[0].sabha})`}
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                     {group.members.map(m => (
@@ -781,7 +1298,12 @@ export default function Reports() {
                               key={other.id}
                               onClick={() => {
                                 if (window.confirm(`Merge "${other.name}" (${other.id}) INTO "${m.name}" (${m.id})? Attendance history moves to ${m.name}.`)) {
-                                  mergeParticipants(m.id, other.id);
+                                  // The result used to be discarded, so a refused
+                                  // merge looked exactly like a successful one.
+                                  reportReview(
+                                    mergeParticipants(m.id, other.id),
+                                    `Merged ${other.name} into ${m.name}. Attendance history moved.`
+                                  );
                                 }
                               }}
                               className="btn btn-secondary"
@@ -938,7 +1460,12 @@ export default function Reports() {
                     return { ...exist, reason: 'Same name and guardian number', confident: true };
                   }
                   if (samePhone) return { ...exist, reason: 'Same guardian number — may be a sibling', confident: false };
-                  if (sameName) return { ...exist, reason: 'Same name — different guardian number', confident: false };
+                  // Same name inside one mandal is a strong signal even without a
+                  // matching number; the same name in a different mandal is not.
+                  if (sameName && sabhaNameKey(exist.sabha, exist.name) === sabhaNameKey(p.sabha, p.name)) {
+                    return { ...exist, reason: 'Same name in the same mandal', confident: true };
+                  }
+                  if (sameName) return { ...exist, reason: 'Same name — different mandal, likely a different balak', confident: false };
                   return null;
                 })
                 .filter(Boolean)

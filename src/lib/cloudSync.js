@@ -88,8 +88,11 @@ const TABLE_MAP = {
   ams_sabhas: {
     table: 'sabhas',
     key: 'name',
-    toRow: (name) => ({ name }),
-    fromRow: (r) => r.name
+    // Sabhas carry the area they roll up to. A row written before the area
+    // column existed reads back as null, so default it here as well as in the
+    // app's own migration.
+    toRow: (s) => ({ name: s.name, area: s.area || 'Unassigned' }),
+    fromRow: (r) => ({ name: r.name, area: r.area || 'Unassigned' })
   },
   ams_karyakars: {
     table: 'karyakars',

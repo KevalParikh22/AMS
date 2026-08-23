@@ -213,7 +213,17 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
 
   const handleUndoPresent = (participantId) => {
     if (!selectedEventId) return;
-    undoAttendance(selectedEventId, participantId);
+    const person = participants.find(p => p.id === participantId);
+    const name = person ? person.name : participantId;
+    const result = undoAttendance(selectedEventId, participantId);
+    // A refusal used to be discarded entirely, so a blocked undo looked exactly
+    // like a successful one. Report both the refusal and a failed cloud write.
+    if (!result?.success) {
+      setSyncError(`${name}: ${result?.message || 'Could not undo that check-in.'}`);
+      setTimeout(() => setSyncError(''), 5000);
+      return;
+    }
+    reportSyncFailure(name, result);
   };
 
   // Touch & Mouse Drag Handler for Premium Swipe Actions

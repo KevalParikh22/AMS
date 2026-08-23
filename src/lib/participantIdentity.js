@@ -30,7 +30,22 @@ export const normalizePhone = (value) => {
   return digits.length > 10 ? digits.slice(-10) : digits;
 };
 
+// Lowercased, trimmed, whitespace-collapsed. Shared by both keys below so they
+// can never disagree about whether two names are the same.
+const normalizeName = (value) =>
+  String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
 // Identity is name + guardian number, not the number alone: siblings share a
 // guardian, so keying on the number would collapse them into one record.
 export const participantKey = (name, phone) =>
-  `${String(name || '').trim().toLowerCase().replace(/\s+/g, ' ')}|${String(phone || '').trim()}`;
+  `${normalizeName(name)}|${String(phone || '').trim()}`;
+
+// Same name within the same mandal-sabha.
+//
+// Name alone is too loose to act on: common names repeat across mandals and
+// belong to different balaks, so a name-only rule buries the real duplicates
+// under false ones. Two records carrying the same name in the SAME mandal are
+// a genuine duplicate signal — the roster for one mandal is small enough that
+// a repeated name there is almost always one person entered twice.
+export const sabhaNameKey = (sabha, name) =>
+  `${normalizeName(sabha)}|${normalizeName(name)}`;

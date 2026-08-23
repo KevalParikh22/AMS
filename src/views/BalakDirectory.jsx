@@ -24,9 +24,10 @@ const PAGE_SIZE = 30;
 // outside that scope simply is not there to correct. This is the screen for
 // managing the records themselves.
 export default function BalakDirectory() {
-  const { participants, sabhas } = useDb();
+  const { participants, sabhaNames, areas, areaOfSabha } = useDb();
 
   const [search, setSearch] = useState('');
+  const [areaFilter, setAreaFilter] = useState('All');
   const [sabhaFilter, setSabhaFilter] = useState('All');
   const [statusFilter, setStatusFilter] = useState('All');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
@@ -36,11 +37,12 @@ export default function BalakDirectory() {
   // never leaves a stale offset over a shorter list.
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
-  }, [search, sabhaFilter, statusFilter]);
+  }, [search, areaFilter, sabhaFilter, statusFilter]);
 
   const q = search.trim().toLowerCase();
   const filtered = participants.filter(p => {
     if (statusFilter !== 'All' && p.status !== statusFilter) return false;
+    if (areaFilter !== 'All' && areaOfSabha(p.sabha) !== areaFilter) return false;
     if (sabhaFilter !== 'All' && p.sabha !== sabhaFilter) return false;
     if (!q) return true;
     return [p.name, p.id, p.phone, p.sabha, p.karyakar, p.guardianDetails]
@@ -49,7 +51,7 @@ export default function BalakDirectory() {
 
   const sorted = [...filtered].sort((a, b) => a.name.localeCompare(b.name));
   const visible = sorted.slice(0, visibleCount);
-  const isFiltered = Boolean(q) || sabhaFilter !== 'All' || statusFilter !== 'All';
+  const isFiltered = Boolean(q) || areaFilter !== 'All' || sabhaFilter !== 'All' || statusFilter !== 'All';
 
   return (
     <div className="container-padding animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
@@ -84,10 +86,18 @@ export default function BalakDirectory() {
           </div>
 
           <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label">Area</label>
+            <select className="form-control" value={areaFilter} onChange={(e) => setAreaFilter(e.target.value)}>
+              <option value="All">All areas</option>
+              {areas.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </div>
+
+          <div className="form-group" style={{ marginBottom: 0 }}>
             <label className="form-label">Sabha</label>
             <select className="form-control" value={sabhaFilter} onChange={(e) => setSabhaFilter(e.target.value)}>
               <option value="All">All sabhas</option>
-              {sabhas.map(s => <option key={s} value={s}>{s}</option>)}
+              {sabhaNames.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
 

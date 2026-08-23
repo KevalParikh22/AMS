@@ -30,7 +30,7 @@ const REQUIRED_FIELDS = {
 const SAMPLE_HEADERS = ['Name', 'Mandal-Sabha', 'Karyakar Name', 'Guardian Contact Details'];
 
 export default function ExcelImport() {
-  const { importExcelData, participants, sabhas, karyakars, addLookupEntries } = useDb();
+  const { importExcelData, participants, sabhaNames, karyakars, addLookupEntries } = useDb();
 
   const [file, setFile] = useState(null);
   const [headers, setHeaders] = useState([]);
@@ -58,7 +58,7 @@ export default function ExcelImport() {
     const rows = karyakars.map((k, i) => sampleRow(i + 1, k.sabha, k.name));
 
     // Sabhas with no karyakar still get a row, showing the karyakar column is optional.
-    sabhas
+    sabhaNames
       .filter(s => !karyakars.some(k => k.sabha === s))
       .forEach((s, i) => rows.push(sampleRow(karyakars.length + i + 1, s, '')));
 
@@ -221,7 +221,7 @@ export default function ExcelImport() {
           ? karyakars.find(k => k.name === parsedRow.karyakar)
           : null;
 
-        const sabhaKnown = parsedRow.sabha ? sabhas.includes(parsedRow.sabha) : true;
+        const sabhaKnown = parsedRow.sabha ? sabhaNames.includes(parsedRow.sabha) : true;
 
         if (parsedRow.sabha && !sabhaKnown) {
           unknownSabhas.set(parsedRow.sabha, true);

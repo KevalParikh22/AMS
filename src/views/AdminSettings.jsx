@@ -19,6 +19,8 @@ import {
 export default function AdminSettings() {
   const {
     sabhas,
+    sabhaNames,
+    areas,
     karyakars,
     participants,
     auditLogs,
@@ -37,6 +39,7 @@ export default function AdminSettings() {
 
   // Lookup Entry Forms
   const [newSabha, setNewSabha] = useState('');
+  const [newSabhaArea, setNewSabhaArea] = useState('');
   const [newKaryakar, setNewKaryakar] = useState('');
   const [newKaryakarSabha, setNewKaryakarSabha] = useState('');
 
@@ -165,7 +168,7 @@ export default function AdminSettings() {
           if (seen.has(name.toLowerCase())) { skipped++; return; }
           seen.add(name.toLowerCase());
 
-          if (!sabhas.includes(sabha)) newSabhas.add(sabha);
+          if (!sabhaNames.includes(sabha)) newSabhas.add(sabha);
           const existing = karyakars.find(k => k.name === name);
           if (!existing) newKaryakars.push({ name, sabha });
           else if (existing.sabha !== sabha) remaps.push({ name, from: existing.sabha, to: sabha });
@@ -221,12 +224,116 @@ export default function AdminSettings() {
   };
 
   const handleDownloadMappingSample = () => {
-    const rows = (karyakars.length ? karyakars : [{ name: 'Ghanshyam Patel', sabha: sabhas[0] || 'Bal Sabha - Sub-group A1' }])
+    const rows = (karyakars.length ? karyakars : [{ name: 'Ghanshyam Patel', sabha: sabhaNames[0] || 'Bal Sabha - Sub-group A1' }])
       .map(k => ({ 'Karyakar Name': k.name, 'Mandal-Sabha': k.sabha }));
     const ws = XLSX.utils.json_to_sheet(rows, { header: ['Karyakar Name', 'Mandal-Sabha'] });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Karyakar Mapping');
     XLSX.writeFile(wb, 'karyakar_mapping_sample.csv', { bookType: 'csv' });
+  };
+
+  // --- Sabha ↔ area mapping import -------------------------------------
+  // Same preview-then-apply shape as the karyakar mapping above: nothing is
+  // written until the admin confirms, because a typo'd sabha name would
+  // otherwise silently become a real sabha in every dropdown.
+  const [areaPreview, setAreaPreview] = useState(null);
+  const [areaMsg, setAreaMsg] = useState('');
+  const areaFileRef = React.useRef(null);
+
+  const AREA_SYNONYMS = ['area', 'region', 'zone', 'cluster', 'kshetra'];
+
+  const handleAreaFile = (e) => {
+    setAreaMsg('');
+    setAreaPreview(null);
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const wb = XLSX.read(new Uint8Array(evt.target.result), { type: 'array' });
+        const matrix = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {
+          header: 1, defval: '', raw: false
+        });
+        if (matrix.length < 2) {
+          setAreaMsg('That file has no data rows.');
+          return;
+        }
+        const headers = matrix[0].map(h => String(h).trim().toLowerCase());
+        // Match area first, then take the sabha column from what is left:
+        // "Area" and "Mandal-Sabha" must not capture each other.
+        const areaCol = headers.findIndex(h => AREA_SYNONYMS.some(x => h.includes(x)));
+        const sabhaCol = headers.findIndex((h, i) => i !== areaCol && SABHA_SYNONYMS.some(x => h.includes(x)));
+        if (areaCol === -1 || sabhaCol === -1) {
+          setAreaMsg(`Could not find both columns. Found headers: ${matrix[0].join(', ') || '(none)'}. Expected a mandal/sabha column and an area column.`);
+          return;
+        }
+
+        const seen = new Set();
+        const assignments = [];   // every valid row, passed to addLookupEntries
+        const newSabhas = [];     // sabhas this sheet would create
+        const changes = [];       // existing sabhas moving to a different area
+        const unchanged = [];
+        const newAreas = new Set();
+        let skipped = 0;
+
+        matrix.slice(1).forEach(row => {
+          const sabha = String(row[sabhaCol] ?? '').trim();
+          const area = String(row[areaCol] ?? '').trim();
+          if (!sabha || !area) { skipped++; return; }
+          if (seen.has(sabha.toLowerCase())) { skipped++; return; }
+          seen.add(sabha.toLowerCase());
+
+          assignments.push({ sabha, area });
+          if (!areas.includes(area)) newAreas.add(area);
+
+          const existing = sabhas.find(s => s.name === sabha);
+          if (!existing) newSabhas.push({ sabha, area });
+          else if (existing.area !== area) changes.push({ sabha, from: existing.area, to: area });
+          else unchanged.push(sabha);
+        });
+
+        setAreaPreview({
+          fileName: file.name,
+          assignments,
+          newSabhas,
+          changes,
+          unchanged,
+          newAreas: [...newAreas],
+          skipped
+        });
+      } catch (err) {
+        console.error(err);
+        setAreaMsg('Could not read that file. Make sure it is a .csv or .xlsx.');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const handleApplyAreas = () => {
+    if (!areaPreview) return;
+    const result = addLookupEntries({ sabhaAreas: areaPreview.assignments });
+    if (result.error) {
+      setAreaMsg(result.error);
+      return;
+    }
+    setAreaMsg(
+      `Assigned ${result.areaChanges.length} mandal(s) to an area` +
+      (result.addedSabhas.length ? `, created ${result.addedSabhas.length} new mandal(s)` : '') +
+      (areaPreview.unchanged.length ? `, ${areaPreview.unchanged.length} already correct` : '') + '.'
+    );
+    setAreaPreview(null);
+    if (areaFileRef.current) areaFileRef.current.value = '';
+    setTimeout(() => setAreaMsg(''), 6000);
+  };
+
+  const handleDownloadAreaSample = () => {
+    const rows = (sabhas.length ? sabhas : [{ name: 'Bal Sabha - Sub-group A1', area: 'North Zone' }])
+      .map(s => ({ 'Mandal-Sabha': s.name, 'Area': s.area }));
+    const ws = XLSX.utils.json_to_sheet(rows, { header: ['Mandal-Sabha', 'Area'] });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Area Mapping');
+    XLSX.writeFile(wb, 'area_mapping_sample.csv', { bookType: 'csv' });
   };
 
   // Audit filtering
@@ -267,21 +374,35 @@ export default function AdminSettings() {
 
   const handleAddSabha = (e) => {
     e.preventDefault();
-    if (!newSabha.trim()) return;
-    if (sabhas.includes(newSabha.trim())) return;
+    const name = newSabha.trim();
+    if (!name) return;
+    if (sabhaNames.includes(name)) return;
 
-    const updated = [...sabhas, newSabha.trim()];
+    const area = newSabhaArea.trim() || 'Unassigned';
+    const updated = [...sabhas, { name, area }];
     setSabhas(updated);
     saveToStorage('ams_sabhas', updated);
-    addAuditLog('Add Sabha Type', `Added new Sabha group: "${newSabha.trim()}"`);
+    addAuditLog('Add Sabha Type', `Added new Sabha group: "${name}" in area "${area}"`);
     setNewSabha('');
+    setNewSabhaArea('');
   };
 
   const handleRemoveSabha = (name) => {
-    const updated = sabhas.filter(s => s !== name);
+    const updated = sabhas.filter(s => s.name !== name);
     setSabhas(updated);
     saveToStorage('ams_sabhas', updated);
     addAuditLog('Remove Sabha Type', `Removed Sabha group: "${name}"`);
+  };
+
+  // Reassign one sabha to a different area, straight from the list.
+  const handleSetSabhaArea = (name, area) => {
+    const clean = String(area || '').trim() || 'Unassigned';
+    const current = sabhas.find(s => s.name === name);
+    if (!current || current.area === clean) return;
+    const updated = sabhas.map(s => (s.name === name ? { ...s, area: clean } : s));
+    setSabhas(updated);
+    saveToStorage('ams_sabhas', updated);
+    addAuditLog('Set Sabha Area', `Moved "${name}" from area "${current.area}" to "${clean}".`);
   };
 
   const handleAddKaryakar = (e) => {
@@ -290,7 +411,7 @@ export default function AdminSettings() {
     if (!name) return;
     if (karyakars.some(k => k.name === name)) return;
 
-    const sabhaAssignment = newKaryakarSabha || sabhas[0] || 'Unassigned';
+    const sabhaAssignment = newKaryakarSabha || sabhaNames[0] || 'Unassigned';
     const updated = [...karyakars, { name, sabha: sabhaAssignment }];
     setKaryakars(updated);
     saveToStorage('ams_karyakars', updated);
@@ -343,41 +464,153 @@ export default function AdminSettings() {
             <span>Manage Sabha Assemblies</span>
           </h3>
 
-          <form onSubmit={handleAddSabha} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
-            <input 
-              type="text" 
-              className="form-control" 
-              placeholder="e.g. Kishore Mandal B" 
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginBottom: '1rem' }}>
+            Each mandal belongs to an area, which is how reports roll several mandals up into one
+            group. Areas are for reporting only — events are still scoped to a single mandal or to all.
+          </p>
+
+          <form onSubmit={handleAddSabha} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+            <input
+              type="text"
+              className="form-control"
+              placeholder="e.g. Kishore Mandal B"
               value={newSabha}
               onChange={(e) => setNewSabha(e.target.value)}
+              style={{ flex: '2 1 140px' }}
               required
+            />
+            <input
+              type="text"
+              className="form-control"
+              placeholder="Area (optional)"
+              list="ams-area-options"
+              value={newSabhaArea}
+              onChange={(e) => setNewSabhaArea(e.target.value)}
+              style={{ flex: '1 1 110px' }}
             />
             <button type="submit" className="btn btn-primary" style={{ padding: '0.6rem 1rem' }}>
               <Plus size={16} />
             </button>
           </form>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '200px', overflowY: 'auto' }}>
+          {/* Shared by both the add form and every row's area box, so an existing
+              area is one click and a new one is just typing. */}
+          <datalist id="ams-area-options">
+            {areas.map(a => <option key={a} value={a} />)}
+          </datalist>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '260px', overflowY: 'auto' }}>
             {sabhas.map(s => (
-              <div key={s} style={{
+              <div key={s.name} style={{
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
+                gap: '0.5rem',
                 padding: '0.5rem 0.75rem',
                 backgroundColor: 'var(--bg-primary)',
                 border: '1px solid var(--border-color)',
                 borderRadius: 'var(--radius-sm)'
               }}>
-                <span style={{ fontSize: '0.875rem' }}>{s}</span>
-                <button 
-                  onClick={() => handleRemoveSabha(s)}
-                  className="btn btn-ghost" 
+                <span style={{ fontSize: '0.875rem', flex: '1 1 auto', minWidth: 0 }}>{s.name}</span>
+                <input
+                  type="text"
+                  className="form-control"
+                  list="ams-area-options"
+                  defaultValue={s.area}
+                  onBlur={(e) => handleSetSabhaArea(s.name, e.target.value)}
+                  title={`Area for ${s.name}`}
+                  style={{ flex: '0 0 130px', padding: '0.3rem 0.5rem', fontSize: '0.78rem' }}
+                />
+                <button
+                  onClick={() => handleRemoveSabha(s.name)}
+                  className="btn btn-ghost"
                   style={{ padding: '0.25rem', color: 'var(--danger)' }}
                 >
                   <Trash2 size={14} />
                 </button>
               </div>
             ))}
+          </div>
+
+          {/* Bulk import of the sabha -> area mapping */}
+          <div style={{
+            border: '1px dashed var(--border-color)',
+            borderRadius: 'var(--radius-sm)',
+            padding: '0.75rem',
+            marginTop: '1rem',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '0.6rem'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>Import area mapping from a sheet</span>
+              <button onClick={handleDownloadAreaSample} className="btn btn-ghost" style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem' }}>
+                <Download size={12} />
+                <span>Sample</span>
+              </button>
+            </div>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+              Two columns: <strong>Mandal-Sabha</strong> and <strong>Area</strong>. Nothing is saved until you review the preview.
+            </p>
+            <input
+              type="file"
+              ref={areaFileRef}
+              accept=".csv,.xlsx,.xls"
+              onChange={handleAreaFile}
+              className="form-control"
+              style={{ fontSize: '0.75rem', padding: '0.35rem' }}
+            />
+
+            {areaMsg && (
+              <div className="badge badge-info" style={{ display: 'block', padding: '0.5rem', fontSize: '0.75rem', borderRadius: 'var(--radius-sm)' }}>
+                {areaMsg}
+              </div>
+            )}
+
+            {areaPreview && (
+              <div style={{ fontSize: '0.76rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                  <span className="badge badge-warning">Area changes: {areaPreview.changes.length}</span>
+                  <span className="badge badge-success">New mandals: {areaPreview.newSabhas.length}</span>
+                  <span className="badge badge-info" style={{ opacity: 0.75 }}>Already correct: {areaPreview.unchanged.length}</span>
+                  {areaPreview.skipped > 0 && <span className="badge badge-danger">Skipped: {areaPreview.skipped}</span>}
+                </div>
+
+                {areaPreview.newAreas.length > 0 && (
+                  <div style={{ color: 'var(--text-secondary)' }}>
+                    <strong>New areas:</strong> {areaPreview.newAreas.join(', ')}
+                  </div>
+                )}
+
+                {areaPreview.changes.length > 0 && (
+                  <div style={{ color: 'var(--warning)' }}>
+                    <strong>Moving:</strong>{' '}
+                    {areaPreview.changes.slice(0, 6).map(c => `${c.sabha}: ${c.from} → ${c.to}`).join('; ')}
+                    {areaPreview.changes.length > 6 && ` … +${areaPreview.changes.length - 6} more`}
+                  </div>
+                )}
+
+                {areaPreview.newSabhas.length > 0 && (
+                  <div style={{ color: 'var(--warning)' }}>
+                    <strong>These mandals do not exist yet and will be created:</strong>{' '}
+                    {areaPreview.newSabhas.map(s => s.sabha).join(', ')}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                  <button onClick={handleApplyAreas} className="btn btn-primary" style={{ padding: '0.35rem 0.8rem', fontSize: '0.76rem' }}>
+                    Apply mapping
+                  </button>
+                  <button
+                    onClick={() => { setAreaPreview(null); if (areaFileRef.current) areaFileRef.current.value = ''; }}
+                    className="btn btn-ghost"
+                    style={{ padding: '0.35rem 0.8rem', fontSize: '0.76rem' }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -408,8 +641,8 @@ export default function AdminSettings() {
               onChange={(e) => setNewKaryakarSabha(e.target.value)}
               title="Sabha this karyakar is responsible for"
             >
-              <option value="">Map to sabha: {sabhas[0] || 'Unassigned'} (default)</option>
-              {sabhas.map(s => (
+              <option value="">Map to sabha: {sabhaNames[0] || 'Unassigned'} (default)</option>
+              {sabhaNames.map(s => (
                 <option key={s} value={s}>Map to sabha: {s}</option>
               ))}
             </select>
