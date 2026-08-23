@@ -68,6 +68,13 @@ const TABLE_MAP = {
     // attendance has no UPDATE policy. Re-pushing an existing id must therefore
     // not take the ON CONFLICT DO UPDATE path. Still prunable, unlike audit_logs.
     immutableRows: true,
+    // The id is the primary key, but `unique (event_id, participant_id)` is what
+    // actually arbitrates between devices. A bulk insert containing someone a
+    // second volunteer already marked violates THAT constraint, and a conflict
+    // on a constraint that is not the target is an error — which would fail the
+    // whole batch. Naming the composite lets ON CONFLICT DO NOTHING skip just
+    // the rows that already exist.
+    conflictTarget: 'event_id,participant_id',
     toRow: (a) => ({
       id: a.id,
       event_id: a.eventId,
@@ -160,7 +167,7 @@ export function pushTable(storageKey, rows) {
       // ON CONFLICT DO NOTHING, which needs no UPDATE policy.
       const { error } = await supabase
         .from(cfg.table)
-        .upsert(mapped, { onConflict: cfg.key, ignoreDuplicates: !!cfg.immutableRows });
+        .upsert(mapped, { onConflict: cfg.conflictTarget || cfg.key, ignoreDuplicates: !!cfg.immutableRows });
       if (error) throw new Error(`${cfg.table} upsert: ${error.message}`);
     }
     // A client must never be able to say "delete everything". An empty array
@@ -170,10 +177,16 @@ export function pushTable(storageKey, rows) {
     // Deliberate wipes go through wipeTable().
     if (!cfg.appendOnly && mapped.length > 0) {
       const keep = mapped.map(r => r[cfg.key]);
+      // JSON.stringify gives PostgREST's own escaping ("a\"b"). The previous
+      // encoder STRIPPED embedded quotes instead of escaping them, so a key
+      // containing one appeared de-quoted in the keep-list, failed to match its
+      // own row, and was deleted by the very prune meant to preserve it. Keys
+      // are ids for most tables but the NAME for sabhas and karyakars, where a
+      // typed quote is entirely plausible.
       const { error } = await supabase
         .from(cfg.table)
         .delete()
-        .not(cfg.key, 'in', `(${keep.map(k => `"${String(k).replace(/"/g, '')}"`).join(',')})`);
+        .not(cfg.key, 'in', `(${keep.map(k => JSON.stringify(String(k))).join(',')})`);
       if (error) throw new Error(`${cfg.table} prune: ${error.message}`);
     }
   };
@@ -221,7 +234,12 @@ export async function upsertRows(storageKey, rows) {
   if (!cfg || !supabase || rows.length === 0) return;
   const { error } = await supabase
     .from(cfg.table)
-    .upsert(rows.map(cfg.toRow), { onConflict: cfg.key, ignoreDuplicates: !!cfg.immutableRows });
+    .upsert(rows.map(cfg.toRow), {
+      // A table whose real uniqueness is a composite must name it, or a
+      // conflict on that constraint is an error instead of a skip.
+      onConflict: cfg.conflictTarget || cfg.key,
+      ignoreDuplicates: !!cfg.immutableRows
+    });
   if (error) throw new Error(`${cfg.table} bulk update: ${error.message}`);
 }
 

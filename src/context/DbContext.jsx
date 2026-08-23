@@ -13,6 +13,28 @@ const DbContext = createContext();
 // above the mandal. Areas are a reporting grouping only — events are still
 // scoped to a single sabha or all of them.
 const UNASSIGNED_AREA = 'Unassigned';
+const ALL_SABHAS = 'All Sabhas';
+const UNASSIGNED_KARYAKAR = 'None Assigned';
+const UNASSOCIATED_SABHA = 'Unassociated';
+
+// Names the system uses as sentinels rather than as real records. A mandal
+// actually called "All Sabhas" would make every all-mandal event look scoped to
+// it and could never be renamed; a karyakar called "None Assigned" would show
+// up as a pickable person in every registration form and quietly adopt every
+// unassigned balak. Nothing stops these being typed today.
+const RESERVED_LOOKUP_NAMES = new Set([
+  ALL_SABHAS, UNASSIGNED_AREA, UNASSOCIATED_SABHA, UNASSIGNED_KARYAKAR
+]);
+
+const validateLookupName = (raw) => {
+  const name = String(raw ?? '').trim();
+  if (!name) return { error: 'The name cannot be empty.' };
+  if (name.length > 120) return { error: 'The name is too long (120 characters max).' };
+  if (RESERVED_LOOKUP_NAMES.has(name)) {
+    return { error: `"${name}" is reserved by the system and cannot be used as a name.` };
+  }
+  return { name };
+};
 
 const INITIAL_SABHAS = [
   { name: 'Bal Sabha - Sub-group A1', area: 'North Zone' },
@@ -677,6 +699,658 @@ export const DbProvider = ({ children }) => {
     return { addedSabhas, addedKaryakars, remapped, movedParticipants, areaChanges };
   };
 
+  // ---------------------------------------------------------------------
+  // Lookup maintenance: rename, merge, delete, reassign
+  //
+  // A mandal's NAME is its identity — it is referenced by participants.sabha,
+  // karyakars.sabha and events.sabhaMandalScope, with no foreign keys and no
+  // transaction. So every operation here is a multi-table cascade that can
+  // half-fail, and the write order is chosen to make that survivable.
+  // ---------------------------------------------------------------------
+
+  const ADMIN_ONLY = { success: false, message: 'Only administrators can edit master data.' };
+
+  // Bulk upserts in slices, so no single request outlives trackWrite's 30s
+  // safety release — which would let a realtime refetch land mid-cascade.
+  const CASCADE_CHUNK = 400;
+  const upsertChunked = async (key, rows) => {
+    for (let i = 0; i < rows.length; i += CASCADE_CHUNK) {
+      await upsertRows(key, rows.slice(i, i + CASCADE_CHUNK));
+    }
+  };
+
+  // Pull back server truth after a cascade fails part-way. Deliberately NOT a
+  // rollback: the earlier steps really did land, and undoing them would be
+  // another multi-write cascade with the same failure mode.
+  const resyncAfterCascade = (keys) => {
+    const refresh = {
+      ams_sabhas: () => refreshFromCloud('ams_sabhas', rows => setSabhas(migrateSabhasList(rows))),
+      ams_karyakars: () => refreshFromCloud('ams_karyakars', rows => setKaryakars(migrateKaryakarsList(rows))),
+      ams_participants: () => refreshFromCloud('ams_participants', rows => setParticipants(migrateParticipantsList(rows))),
+      ams_events: () => refreshFromCloud('ams_events', setEvents)
+    };
+    keys.forEach(k => refresh[k] && refresh[k]());
+  };
+
+  // Reference counts for every sabha and karyakar name in use — including names
+  // that are REFERENCED but never configured (legacy rosters, imports that
+  // created a mandal implicitly, a half-finished cascade). Surfacing those
+  // orphans is what makes drift fixable instead of invisible.
+  const lookupUsage = useCallback(() => {
+    const bySabha = {};
+    const byKaryakar = {};
+    const sabhaEntry = (n) => (bySabha[n] || (bySabha[n] = {
+      participants: 0, activeParticipants: 0, karyakars: 0, events: 0, openEvents: 0, configured: false, area: null
+    }));
+    const karyakarEntry = (n) => (byKaryakar[n] || (byKaryakar[n] = {
+      participants: 0, activeParticipants: 0, configured: false, sabha: null
+    }));
+
+    sabhas.forEach(s => {
+      const e = sabhaEntry(s.name);
+      e.configured = true;
+      e.area = s.area;
+    });
+
+    karyakars.forEach(k => {
+      const e = karyakarEntry(k.name);
+      e.configured = true;
+      e.sabha = k.sabha;
+      // A karyakar mapped to a mandal references it even when no balak does —
+      // which is what makes deleting an apparently empty mandal unsafe.
+      if (k.sabha) sabhaEntry(k.sabha).karyakars++;
+    });
+
+    participants.forEach(p => {
+      const active = p.status === 'approved' || p.status === 'pending';
+      if (p.sabha) {
+        const e = sabhaEntry(p.sabha);
+        e.participants++;
+        if (active) e.activeParticipants++;
+      }
+      if (p.karyakar) {
+        const e = karyakarEntry(p.karyakar);
+        e.participants++;
+        if (active) e.activeParticipants++;
+      }
+    });
+
+    events.forEach(ev => {
+      // 'All Sabhas' is a scope sentinel, not a mandal. It survives every
+      // rename and must never count as a reference to one.
+      if (!ev.sabhaMandalScope || ev.sabhaMandalScope === ALL_SABHAS) return;
+      const e = sabhaEntry(ev.sabhaMandalScope);
+      e.events++;
+      // An OPEN event scoped to a mandal is the dangerous reference: the public
+      // link stamps an Active event's scope onto every walk-in it creates.
+      if (getEffectiveStatus(ev) !== 'Closed') e.openEvents++;
+    });
+
+    const orphans = (map) => Object.keys(map)
+      .filter(n => !map[n].configured && !RESERVED_LOOKUP_NAMES.has(n))
+      .sort();
+
+    return {
+      sabhas: bySabha,
+      karyakars: byKaryakar,
+      orphanSabhas: orphans(bySabha),
+      orphanKaryakars: orphans(byKaryakar)
+    };
+  }, [participants, karyakars, events, sabhas]);
+
+  // Rewrite every reference to sabha `from` so it points at `to`, then retire
+  // `from`. rename / merge / delete-with-reassign are all this one operation —
+  // they differ only in whether `to` already exists and what the log says.
+  const rewriteSabhaReferences = ({ from, to, action, summary }) => {
+    const sourceRow = sabhas.find(s => s.name === from);
+    const targetExisting = sabhas.find(s => s.name === to);
+    // A rename carries the source's area across; a merge leaves the target's
+    // area alone, because the target is the record that survives.
+    const targetRow = targetExisting || { name: to, area: sourceRow?.area || UNASSIGNED_AREA };
+
+    const nextSabhas = targetExisting
+      ? sabhas.filter(s => s.name !== from)
+      : sourceRow
+        ? sabhas.map(s => (s.name === from ? targetRow : s))
+        : [...sabhas, targetRow];
+
+    const touchedKaryakars = karyakars.filter(k => k.sabha === from).map(k => ({ ...k, sabha: to }));
+    const nextKaryakars = karyakars.map(k => (k.sabha === from ? { ...k, sabha: to } : k));
+
+    // ALL statuses, not just active. A rename changes what the mandal is
+    // CALLED and a merge says it no longer exists — both are as true of an
+    // archived balak as a live one. Leaving those rows behind would strand them
+    // on a name no lookup row backs, so every historical report mis-groups them.
+    const touchedParticipants = participants.filter(p => p.sabha === from).map(p => ({ ...p, sabha: to }));
+    const nextParticipants = participants.map(p => (p.sabha === from ? { ...p, sabha: to } : p));
+
+    const touchedEvents = events.filter(e => e.sabhaMandalScope === from).map(e => ({ ...e, sabhaMandalScope: to }));
+    const nextEvents = events.map(e => (e.sabhaMandalScope === from ? { ...e, sabhaMandalScope: to } : e));
+
+    const counts = {
+      participants: touchedParticipants.length,
+      karyakars: touchedKaryakars.length,
+      events: touchedEvents.length
+    };
+
+    setSabhas(nextSabhas);
+    setKaryakars(nextKaryakars);
+    setParticipants(nextParticipants);
+    setEvents(nextEvents);
+
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_sabhas', JSON.stringify(nextSabhas));
+      localStorage.setItem('ams_karyakars', JSON.stringify(nextKaryakars));
+      localStorage.setItem('ams_participants', JSON.stringify(nextParticipants));
+      localStorage.setItem('ams_events', JSON.stringify(nextEvents));
+
+      // The WHOLE cascade runs under one sabhas write-marker. Our own writes
+      // echo back through the realtime subscription, which debounces 800ms —
+      // long enough to land mid-cascade, refetch a sabhas table that genuinely
+      // holds BOTH names, and flash the duplicate into every dropdown.
+      syncPromise = trackWrite('ams_sabhas', (async () => {
+        // 1. Destination first: additive and idempotent, so if everything after
+        //    this fails the worst outcome is one extra empty mandal.
+        await upsertRows('ams_sabhas', [targetRow]);
+        // 2-4. Move the references. Row-targeted throughout — a full-table push
+        //      would prune rows this device has not received.
+        if (touchedKaryakars.length) {
+          await trackWrite('ams_karyakars', upsertChunked('ams_karyakars', touchedKaryakars));
+        }
+        if (touchedParticipants.length) {
+          await trackWrite('ams_participants', upsertChunked('ams_participants', touchedParticipants));
+        }
+        if (touchedEvents.length) {
+          await trackWrite('ams_events', upsertChunked('ams_events', touchedEvents));
+        }
+        // 5. Retire the old name LAST. Until this lands nothing dangles and the
+        //    whole operation is re-runnable; once it lands nothing points at it.
+        await deleteRow('ams_sabhas', from);
+      })())
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error(`${action} failed:`, err);
+          setCloudStatus('error');
+          resyncAfterCascade(['ams_sabhas', 'ams_karyakars', 'ams_participants', 'ams_events']);
+          // The success entry below was already written optimistically, so it
+          // must not be left claiming this finished.
+          addAuditLog(
+            'Lookup Rewrite Incomplete',
+            `${action} "${from}" → "${to}" did not finish: ${err.message}. Some records may still reference "${from}".`
+          );
+          throw new Error(
+            `"${from}" was only partly updated — some records may still reference it. ` +
+            `Once the connection is back, merge "${from}" into "${to}" to finish.`
+          );
+        });
+    } else {
+      saveToStorage('ams_sabhas', nextSabhas);
+      saveToStorage('ams_karyakars', nextKaryakars);
+      saveToStorage('ams_participants', nextParticipants);
+      saveToStorage('ams_events', nextEvents);
+    }
+
+    // One entry for the whole operation — addAuditLog pushes the entire audit
+    // table per call.
+    addAuditLog(
+      action,
+      `${summary} Rewrote ${counts.participants} participant record(s), ` +
+      `${counts.karyakars} karyakar mapping(s) and ${counts.events} event scope(s).`
+    );
+
+    return { success: true, from, to, counts, syncPromise };
+  };
+
+  const mergeSabhas = (sourceName, targetName) => {
+    if (!hasPermission(ROLES.ADMIN)) return ADMIN_ONLY;
+    const from = String(sourceName ?? '').trim();
+    const to = String(targetName ?? '').trim();
+    if (!from || !to) return { success: false, message: 'Both mandals must be named.' };
+    if (from === to) return { success: false, message: 'A mandal cannot be merged into itself.' };
+
+    const usage = lookupUsage().sabhas;
+    const source = sabhas.find(s => s.name === from);
+    const target = sabhas.find(s => s.name === to);
+    // The source may be an orphan — a name rows reference but nobody configured.
+    // Adopting one is exactly what this tool is for.
+    if (!source && !usage[from]) return { success: false, message: `Nothing references "${from}".` };
+    if (!target) return { success: false, message: `"${to}" is not a configured mandal — rename "${from}" instead.` };
+
+    return rewriteSabhaReferences({
+      from,
+      to,
+      action: 'Sabhas Merged',
+      summary:
+        `Merged mandal "${from}" into "${to}" and removed "${from}".` +
+        (source && source.area !== target.area
+          ? ` "${from}" was in area "${source.area}"; everything now rolls up under "${target.area}".`
+          : '')
+    });
+  };
+
+  const renameSabha = (oldName, newName, { allowMerge = false } = {}) => {
+    if (!hasPermission(ROLES.ADMIN)) return ADMIN_ONLY;
+
+    const from = String(oldName ?? '').trim();
+    const check = validateLookupName(newName);
+    if (check.error) return { success: false, message: check.error };
+    const to = check.name;
+
+    const usage = lookupUsage().sabhas;
+    if (!sabhas.some(s => s.name === from) && !usage[from]) {
+      return { success: false, message: `"${from}" is not a configured mandal.` };
+    }
+    if (from === to) {
+      return { success: true, unchanged: true, counts: { participants: 0, karyakars: 0, events: 0 } };
+    }
+
+    // EXACT equality, deliberately. Postgres text keys are case-sensitive and
+    // every comparison in this app is ===, so "Yuva mandal" and "Yuva Mandal"
+    // really are two mandals — which makes a capitalisation fix a genuine
+    // rename that must not be diverted into the merge branch. It works because
+    // upsert(new) and delete(old) target two distinct keys.
+    if (sabhas.some(s => s.name === to)) {
+      if (!allowMerge) {
+        return {
+          success: false,
+          requiresMerge: true,
+          message: `"${to}" already exists. Renaming "${from}" onto it merges the two mandals — that cannot be undone.`,
+          source: usage[from] || null,
+          target: usage[to] || null
+        };
+      }
+      return mergeSabhas(from, to);
+    }
+
+    return rewriteSabhaReferences({
+      from,
+      to,
+      action: 'Sabha Renamed',
+      summary: `Renamed mandal "${from}" to "${to}".`
+    });
+  };
+
+  const deleteSabha = (name, { reassignTo = null } = {}) => {
+    if (!hasPermission(ROLES.ADMIN)) return ADMIN_ONLY;
+
+    const target = String(name ?? '').trim();
+    const source = sabhas.find(s => s.name === target);
+    if (!source) return { success: false, message: `"${target}" is not a configured mandal.` };
+
+    const usage = lookupUsage().sabhas[target] ||
+      { participants: 0, activeParticipants: 0, karyakars: 0, events: 0, openEvents: 0 };
+
+    if (reassignTo) {
+      const to = String(reassignTo).trim();
+      if (to === target) return { success: false, message: 'Choose a different mandal to move the records to.' };
+      if (!sabhas.some(s => s.name === to)) return { success: false, message: `"${to}" is not a configured mandal.` };
+      // Reassign-then-delete IS a merge, so it takes the same path and inherits
+      // the same ordering guarantee.
+      const result = rewriteSabhaReferences({
+        from: target,
+        to,
+        action: 'Sabha Deleted (Reassigned)',
+        summary: `Deleted mandal "${target}" and moved everything that referenced it to "${to}".`
+      });
+      return { ...result, usage };
+    }
+
+    // No destination: refuse rather than strand references on a name no lookup
+    // row backs. Those balaks would report as area "Unassigned" forever, the
+    // registration form could never offer the mandal again, and an OPEN event
+    // scoped to it would stamp the dead name onto every public walk-in.
+    const blocking = usage.participants + usage.karyakars + usage.events;
+    if (blocking > 0) {
+      return {
+        success: false,
+        requiresReassign: true,
+        usage,
+        message:
+          `"${target}" is still referenced by ${usage.participants} participant record(s) ` +
+          `(${usage.activeParticipants} active), ${usage.karyakars} karyakar(s) and ${usage.events} event(s)` +
+          `${usage.openEvents ? `, ${usage.openEvents} of them still open` : ''}. ` +
+          `Pick another mandal to move them to, or clear the references first.`
+      };
+    }
+
+    const nextSabhas = sabhas.filter(s => s.name !== target);
+    setSabhas(nextSabhas);
+
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_sabhas', JSON.stringify(nextSabhas));
+      // deleteRow, not a full push, whose prune would also delete every mandal
+      // another admin added since this tab last synced.
+      syncPromise = trackWrite('ams_sabhas', deleteRow('ams_sabhas', target))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Sabha delete failed:', err);
+          setCloudStatus('error');
+          resyncAfterCascade(['ams_sabhas']);
+          throw new Error(`"${target}" could not be removed — check the connection and try again.`);
+        });
+    } else {
+      saveToStorage('ams_sabhas', nextSabhas);
+    }
+
+    addAuditLog('Sabha Deleted', `Removed unused mandal "${target}" (area "${source.area}"). Nothing referenced it.`);
+    return { success: true, usage, syncPromise };
+  };
+
+  // The karyakar equivalent, one table shorter: no event references a karyakar.
+  const rewriteKaryakarReferences = ({ from, to, createRow = null, action, summary }) => {
+    const nextKaryakars = createRow
+      ? karyakars.map(k => (k.name === from ? createRow : k))
+      : karyakars.filter(k => k.name !== from);
+
+    // Only the karyakar column moves. p.sabha and k.sabha are independent:
+    // renaming or merging a PERSON says nothing about which mandal their balaks
+    // sit in. setKaryakarSabha is where that decision lives.
+    const touched = participants.filter(p => p.karyakar === from).map(p => ({ ...p, karyakar: to }));
+    const nextParticipants = participants.map(p => (p.karyakar === from ? { ...p, karyakar: to } : p));
+
+    setKaryakars(nextKaryakars);
+    setParticipants(nextParticipants);
+
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_karyakars', JSON.stringify(nextKaryakars));
+      localStorage.setItem('ams_participants', JSON.stringify(nextParticipants));
+      syncPromise = trackWrite('ams_karyakars', (async () => {
+        if (createRow) await upsertRows('ams_karyakars', [createRow]);
+        if (touched.length) {
+          await trackWrite('ams_participants', upsertChunked('ams_participants', touched));
+        }
+        await deleteRow('ams_karyakars', from);
+      })())
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error(`${action} failed:`, err);
+          setCloudStatus('error');
+          resyncAfterCascade(['ams_karyakars', 'ams_participants']);
+          addAuditLog(
+            'Lookup Rewrite Incomplete',
+            `${action} "${from}" → "${to}" did not finish: ${err.message}. Some participants may still name "${from}".`
+          );
+          throw new Error(`"${from}" was only partly updated — re-run this once the connection is back.`);
+        });
+    } else {
+      saveToStorage('ams_karyakars', nextKaryakars);
+      saveToStorage('ams_participants', nextParticipants);
+    }
+
+    addAuditLog(action, `${summary} Rewrote ${touched.length} participant record(s).`);
+    return { success: true, from, to, counts: { participants: touched.length }, syncPromise };
+  };
+
+  const renameKaryakar = (oldName, newName, { allowMerge = false } = {}) => {
+    if (!hasPermission(ROLES.ADMIN)) return ADMIN_ONLY;
+
+    const from = String(oldName ?? '').trim();
+    const check = validateLookupName(newName);
+    if (check.error) return { success: false, message: check.error };
+    const to = check.name;
+
+    const source = karyakars.find(k => k.name === from);
+    if (!source) return { success: false, message: `"${from}" is not a configured karyakar.` };
+    if (from === to) return { success: true, unchanged: true, counts: { participants: 0 } };
+
+    const target = karyakars.find(k => k.name === to);
+    if (target) {
+      if (!allowMerge) {
+        return {
+          success: false,
+          requiresMerge: true,
+          message:
+            `"${to}" already exists (mandal "${target.sabha}"). Renaming "${from}" onto them merges the two ` +
+            `karyakar records — their balaks keep whichever mandal they are in now. This cannot be undone.`
+        };
+      }
+      return rewriteKaryakarReferences({
+        from, to, createRow: null,
+        action: 'Karyakars Merged',
+        summary: `Merged karyakar "${from}" (mandal "${source.sabha}") into "${to}" (mandal "${target.sabha}").`
+      });
+    }
+
+    return rewriteKaryakarReferences({
+      from, to,
+      // Carry the mandal across so the registration form's sabha → karyakar
+      // auto-select keeps working the moment this lands.
+      createRow: { name: to, sabha: source.sabha },
+      action: 'Karyakar Renamed',
+      summary: `Renamed karyakar "${from}" to "${to}" (mandal "${source.sabha}").`
+    });
+  };
+
+  const deleteKaryakar = (name, { reassignTo = null } = {}) => {
+    if (!hasPermission(ROLES.ADMIN)) return ADMIN_ONLY;
+
+    const target = String(name ?? '').trim();
+    const source = karyakars.find(k => k.name === target);
+    if (!source) return { success: false, message: `"${target}" is not a configured karyakar.` };
+
+    const usage = lookupUsage().karyakars[target] || { participants: 0, activeParticipants: 0 };
+
+    if (reassignTo) {
+      const to = String(reassignTo).trim();
+      if (to === target) return { success: false, message: 'Choose a different karyakar.' };
+      // 'None Assigned' is the roster's own "nobody yet" value and is a legal
+      // DESTINATION — but createRow stays null so it is never written into the
+      // karyakars table, where it would become a pickable person in every form.
+      if (to !== UNASSIGNED_KARYAKAR && !karyakars.some(k => k.name === to)) {
+        return { success: false, message: `"${to}" is not a configured karyakar.` };
+      }
+      const result = rewriteKaryakarReferences({
+        from: target, to, createRow: null,
+        action: 'Karyakar Deleted (Reassigned)',
+        summary: `Deleted karyakar "${target}" (mandal "${source.sabha}") and reassigned their balaks to "${to}".`
+      });
+      return { ...result, usage };
+    }
+
+    if (usage.participants > 0) {
+      return {
+        success: false,
+        requiresReassign: true,
+        usage,
+        message:
+          `"${target}" is still the karyakar on ${usage.participants} participant record(s) ` +
+          `(${usage.activeParticipants} active). Pick someone to reassign them to, or "${UNASSIGNED_KARYAKAR}".`
+      };
+    }
+
+    const nextKaryakars = karyakars.filter(k => k.name !== target);
+    setKaryakars(nextKaryakars);
+
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_karyakars', JSON.stringify(nextKaryakars));
+      syncPromise = trackWrite('ams_karyakars', deleteRow('ams_karyakars', target))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Karyakar delete failed:', err);
+          setCloudStatus('error');
+          resyncAfterCascade(['ams_karyakars']);
+          throw new Error(`"${target}" could not be removed — check the connection and try again.`);
+        });
+    } else {
+      saveToStorage('ams_karyakars', nextKaryakars);
+    }
+
+    addAuditLog('Karyakar Deleted', `Removed karyakar "${target}" (mandal "${source.sabha}"). No participant named them.`);
+    return { success: true, usage, syncPromise };
+  };
+
+  // Move one karyakar to a different mandal. Until now the only way to do this
+  // was to re-import a CSV through addLookupEntries' remap path.
+  const setKaryakarSabha = (name, sabha, { cascadeParticipants = true } = {}) => {
+    if (!hasPermission(ROLES.ADMIN)) return ADMIN_ONLY;
+
+    const who = String(name ?? '').trim();
+    const to = String(sabha ?? '').trim();
+    const existing = karyakars.find(k => k.name === who);
+    if (!existing) return { success: false, message: `"${who}" is not a configured karyakar.` };
+    if (!to) return { success: false, message: 'Pick a mandal.' };
+    // 'Unassigned' is the karyakars column default and stays legal. Anything
+    // else must be a real mandal, or Registration's karyakar filter can never
+    // surface this person again.
+    if (to !== UNASSIGNED_AREA && !sabhas.some(s => s.name === to)) {
+      return { success: false, message: `"${to}" is not a configured mandal.` };
+    }
+
+    const from = existing.sabha;
+    if (from === to) return { success: true, unchanged: true, counts: { participants: 0 } };
+
+    // Exactly addLookupEntries' cascade rule, for its reasons: only balaks
+    // still sitting in this karyakar's OLD mandal follow them, and only active
+    // records, because this is a MOVE rather than a relabel — rewriting an
+    // archived balak's mandal would falsify their history.
+    const touched = cascadeParticipants
+      ? participants
+          .filter(p =>
+            (p.status === 'approved' || p.status === 'pending') &&
+            p.karyakar === who && p.sabha === from)
+          .map(p => ({ ...p, sabha: to }))
+      : [];
+    const movedIds = new Set(touched.map(p => p.id));
+    const nextParticipants = movedIds.size
+      ? participants.map(p => (movedIds.has(p.id) ? { ...p, sabha: to } : p))
+      : participants;
+
+    const updatedRow = { ...existing, sabha: to };
+    const nextKaryakars = karyakars.map(k => (k.name === who ? updatedRow : k));
+
+    setKaryakars(nextKaryakars);
+    if (movedIds.size) setParticipants(nextParticipants);
+
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_karyakars', JSON.stringify(nextKaryakars));
+      if (movedIds.size) localStorage.setItem('ams_participants', JSON.stringify(nextParticipants));
+
+      syncPromise = trackWrite('ams_karyakars', (async () => {
+        // ORDER INVERTED relative to the rename cascades, on purpose. Here the
+        // karyakar row is the marker that says "this move happened": the
+        // cascade keys on `p.sabha === from`, so if the karyakar row moved
+        // first and the participant write then failed, a retry would find
+        // from === to, short-circuit, and strand those balaks forever. In this
+        // order a failure leaves the karyakar where they were and re-running
+        // finishes the job.
+        if (touched.length) {
+          await trackWrite('ams_participants', upsertChunked('ams_participants', touched));
+        }
+        await upsertRows('ams_karyakars', [updatedRow]);
+      })())
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Karyakar mandal change failed:', err);
+          setCloudStatus('error');
+          resyncAfterCascade(['ams_karyakars', 'ams_participants']);
+          throw new Error(`Could not move "${who}" to "${to}" — check the connection and try again.`);
+        });
+    } else {
+      saveToStorage('ams_karyakars', nextKaryakars);
+      if (movedIds.size) saveToStorage('ams_participants', nextParticipants);
+    }
+
+    addAuditLog(
+      'Karyakar Mandal Changed',
+      `Moved karyakar "${who}" from mandal "${from}" to "${to}". ` +
+      (cascadeParticipants
+        ? `${touched.length} active balak(s) still in "${from}" moved with them.`
+        : 'Their balaks were left in their current mandals.')
+    );
+
+    return { success: true, from, to, counts: { participants: touched.length }, syncPromise };
+  };
+
+  // Add a mandal or a karyakar. Replaces the raw setSabhas/saveToStorage calls
+  // the settings screen used to make, which bypassed the Admin gate entirely.
+  const addSabha = (name, area) => {
+    if (!hasPermission(ROLES.ADMIN)) return ADMIN_ONLY;
+    const check = validateLookupName(name);
+    if (check.error) return { success: false, message: check.error };
+    // Case-insensitive, unlike the old check: "Kishore B" and "kishore b" are
+    // two diverging text keys that nothing would ever reconcile.
+    const clash = sabhas.find(s => s.name.toLowerCase() === check.name.toLowerCase());
+    if (clash) return { success: false, message: `"${clash.name}" already exists.` };
+
+    const row = { name: check.name, area: String(area || '').trim() || UNASSIGNED_AREA };
+    const next = [...sabhas, row];
+    setSabhas(next);
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_sabhas', JSON.stringify(next));
+      syncPromise = trackWrite('ams_sabhas', upsertRows('ams_sabhas', [row]))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          setCloudStatus('error');
+          resyncAfterCascade(['ams_sabhas']);
+          throw new Error(`Could not add "${row.name}": ${err.message}`);
+        });
+    } else {
+      saveToStorage('ams_sabhas', next);
+    }
+    addAuditLog('Add Sabha Type', `Added mandal "${row.name}" in area "${row.area}".`);
+    return { success: true, sabha: row, syncPromise };
+  };
+
+  const setSabhaArea = (name, area) => {
+    if (!hasPermission(ROLES.ADMIN)) return ADMIN_ONLY;
+    const current = sabhas.find(s => s.name === name);
+    if (!current) return { success: false, message: `"${name}" is not a configured mandal.` };
+    const clean = String(area || '').trim() || UNASSIGNED_AREA;
+    if (current.area === clean) return { success: true, unchanged: true };
+
+    const row = { ...current, area: clean };
+    const next = sabhas.map(s => (s.name === name ? row : s));
+    setSabhas(next);
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_sabhas', JSON.stringify(next));
+      syncPromise = trackWrite('ams_sabhas', upsertRows('ams_sabhas', [row]))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          setCloudStatus('error');
+          resyncAfterCascade(['ams_sabhas']);
+          throw new Error(`Could not move "${name}" to area "${clean}": ${err.message}`);
+        });
+    } else {
+      saveToStorage('ams_sabhas', next);
+    }
+    addAuditLog('Set Sabha Area', `Moved "${name}" from area "${current.area}" to "${clean}".`);
+    return { success: true, syncPromise };
+  };
+
+  const addKaryakar = (name, sabha) => {
+    if (!hasPermission(ROLES.ADMIN)) return ADMIN_ONLY;
+    const check = validateLookupName(name);
+    if (check.error) return { success: false, message: check.error };
+    const clash = karyakars.find(k => k.name.toLowerCase() === check.name.toLowerCase());
+    if (clash) return { success: false, message: `"${clash.name}" already exists.` };
+
+    const row = { name: check.name, sabha: String(sabha || '').trim() || UNASSIGNED_AREA };
+    const next = [...karyakars, row];
+    setKaryakars(next);
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_karyakars', JSON.stringify(next));
+      syncPromise = trackWrite('ams_karyakars', upsertRows('ams_karyakars', [row]))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          setCloudStatus('error');
+          resyncAfterCascade(['ams_karyakars']);
+          throw new Error(`Could not add "${row.name}": ${err.message}`);
+        });
+    } else {
+      saveToStorage('ams_karyakars', next);
+    }
+    addAuditLog('Add Karyakar Profile', `Added karyakar "${row.name}" mapped to mandal "${row.sabha}".`);
+    return { success: true, karyakar: row, syncPromise };
+  };
+
   // Register or insert spreadsheet imports (Admin only, per decision D4)
   const importExcelData = (parsedRows) => {
     if (!hasPermission(ROLES.ADMIN)) {
@@ -688,18 +1362,75 @@ export const DbProvider = ({ children }) => {
     let rejected = 0;
     let review = 0;
     let duplicates = 0;
+    let idNotFound = 0;
     const newParticipantsList = [...participants];
     const seenKeysInFile = new Set();
+    const seenIdsInFile = new Set();
     // Exactly the rows this import creates or changes — the only ones that
     // need writing. Anything untouched must be left alone in the cloud.
     const touchedRows = [];
 
     parsedRows.forEach(row => {
       const name = String(row.name || '').trim();
-      const guardianDetails = String(row.guardianDetails || '').trim();
+      // A masked export writes the literal "Restricted" into this column for a
+      // user who may not see guardian details. Re-importing that would destroy
+      // the real contact, so treat it as an empty cell.
+      const rawGuardian = String(row.guardianDetails || '').trim();
+      const guardianDetails = rawGuardian === 'Restricted' ? '' : rawGuardian;
       // Rosters carry the guardian's number in the free-text guardian column;
       // an explicit phone value still wins if the sheet supplies one.
       const phone = normalizePhone(row.phone) || extractGuardianPhone(guardianDetails);
+      const sheetId = String(row.id || '').trim();
+
+      // --- ID-keyed edit -------------------------------------------------
+      //
+      // The whole point of the round trip. Identity is normally name + guardian
+      // number, so correcting either in a sheet changes the key and the row
+      // lands as a NEW person. An explicit id says "this is that record" and
+      // makes a bulk rename or number fix possible at all.
+      if (sheetId) {
+        if (seenIdsInFile.has(sheetId)) {
+          duplicates++;
+          return;
+        }
+        seenIdsInFile.add(sheetId);
+
+        const idx = newParticipantsList.findIndex(p => p.id === sheetId);
+        if (idx === -1) {
+          // Never invent a person from an id that matches nothing — a stale or
+          // mistyped id would silently create a duplicate of someone real.
+          idNotFound++;
+          return;
+        }
+        if (!name) {
+          rejected++;
+          return;
+        }
+
+        const existing = newParticipantsList[idx];
+        const merged = {
+          ...existing,
+          name,
+          // A blank cell means "leave this alone", never "clear it".
+          phone: phone || existing.phone,
+          sabha: row.sabha || existing.sabha,
+          karyakar: row.karyakar || existing.karyakar,
+          guardianDetails: guardianDetails || existing.guardianDetails
+        };
+        const isSame = merged.name === existing.name &&
+          merged.phone === existing.phone &&
+          merged.sabha === existing.sabha &&
+          merged.karyakar === existing.karyakar &&
+          merged.guardianDetails === existing.guardianDetails;
+        if (isSame) {
+          unchanged++;
+        } else {
+          newParticipantsList[idx] = merged;
+          touchedRows.push(merged);
+          updated++;
+        }
+        return;
+      }
 
       if (!name) {
         rejected++;
@@ -780,17 +1511,23 @@ export const DbProvider = ({ children }) => {
     });
 
     setParticipants(newParticipantsList);
+    let syncPromise;
     if (isCloudMode) {
       // Only the rows this import actually created or changed. A full-table
       // reconcile would delete every cloud participant absent from the file —
       // catastrophic if the roster had not loaded, and wrong even when it had,
       // since an import is not a declaration of the entire registry.
       localStorage.setItem('ams_participants', JSON.stringify(newParticipantsList));
-      trackWrite('ams_participants', upsertRows('ams_participants', touchedRows))
+      // Returned so the caller can report a failure. This used to be swallowed
+      // into console.error, so the summary could claim "48 updated" when not one
+      // row had reached Supabase.
+      syncPromise = trackWrite('ams_participants', upsertRows('ams_participants', touchedRows))
         .then(() => setCloudStatus('online'))
         .catch(err => {
           console.error('Import sync failed:', err);
           setCloudStatus('error');
+          refreshFromCloud('ams_participants', rows => setParticipants(migrateParticipantsList(rows)));
+          throw new Error('The import did not reach the server — check the connection and run it again.');
         });
     } else {
       saveToStorage('ams_participants', newParticipantsList);
@@ -799,10 +1536,11 @@ export const DbProvider = ({ children }) => {
     // Audit Log
     addAuditLog(
       'Excel Master Import',
-      `Imported raw sheet data. Created ${inserted} new, updated ${updated}, ${unchanged} unchanged, ${review} routed to review (no phone), ${duplicates} duplicate rows skipped, ${rejected} rejected.`
+      `Imported raw sheet data. Created ${inserted} new, updated ${updated}, ${unchanged} unchanged, ${review} routed to review (no phone), ${duplicates} duplicate rows skipped, ${rejected} rejected` +
+      (idNotFound ? `, ${idNotFound} rejected for an unknown participant ID` : '') + '.'
     );
 
-    return { inserted, updated, unchanged, rejected, review, duplicates };
+    return { inserted, updated, unchanged, rejected, review, duplicates, idNotFound, syncPromise };
   };
 
   // Events API (Coordinator+, per decision D4)
@@ -918,6 +1656,109 @@ export const DbProvider = ({ children }) => {
     );
 
     return { success: true, attendance: newAttendance, syncPromise };
+  };
+
+  // Mark many people present in one operation.
+  //
+  // This exists because markPresent CANNOT be called in a loop. It reads the
+  // `attendance` state captured in the current render — both for its duplicate
+  // check and to build `[...attendance, row]` — and that value does not change
+  // between synchronous calls. Every iteration would therefore rebuild the array
+  // from the same starting point, so only the LAST mark would survive in state,
+  // and the duplicate guard would be blind to marks made earlier in the loop.
+  // It would also write one audit entry per person, each of which pushes the
+  // entire audit table.
+  //
+  // So: guards once, dedupe against one snapshot, one state update, one write,
+  // one audit entry.
+  const markPresentBulk = (eventId, participantIds, { allowClosed = false } = {}) => {
+    if (!user) {
+      return { success: false, message: 'Sign in required to mark attendance.' };
+    }
+    const event = events.find(e => e.id === eventId);
+    if (!event) return { success: false, message: 'Event not found' };
+    const isClosed = getEffectiveStatus(event) === 'Closed';
+    const correcting = isClosed && allowClosed && hasPermission(ROLES.ADMIN);
+    if (isClosed && !correcting) {
+      return { success: false, message: 'Cannot register attendance: Event is closed.' };
+    }
+
+    const alreadyPresent = new Set(
+      attendance.filter(a => a.eventId === eventId).map(a => a.participantId)
+    );
+    const knownIds = new Set(participants.map(p => p.id));
+
+    const newRows = [];
+    const skippedAlreadyPresent = [];
+    const skippedUnknown = [];
+    const seenInBatch = new Set();
+    const markedAt = new Date().toISOString();
+
+    participantIds.forEach(participantId => {
+      if (!knownIds.has(participantId)) { skippedUnknown.push(participantId); return; }
+      if (alreadyPresent.has(participantId)) { skippedAlreadyPresent.push(participantId); return; }
+      // The same person listed twice in one sheet must not produce two rows.
+      if (seenInBatch.has(participantId)) return;
+      seenInBatch.add(participantId);
+      newRows.push({
+        id: uniqueId('A-'),
+        eventId,
+        participantId,
+        status: 'Present',
+        markedAt,
+        markedBy: user.name
+      });
+    });
+
+    if (newRows.length === 0) {
+      return {
+        success: true,
+        marked: 0,
+        alreadyPresent: skippedAlreadyPresent.length,
+        unknown: skippedUnknown.length,
+        message: 'Nobody new to mark present.'
+      };
+    }
+
+    const updatedAttendance = [...attendance, ...newRows];
+    setAttendance(updatedAttendance);
+
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_attendance', JSON.stringify(updatedAttendance));
+      // upsertRows, not repeated insertRow: attendance names the composite
+      // (event_id, participant_id) as its conflict target, so anyone another
+      // device marked in the meantime is skipped rather than failing the batch.
+      syncPromise = trackWrite('ams_attendance', upsertRows('ams_attendance', newRows))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Bulk attendance import failed:', err);
+          setCloudStatus('error');
+          // Drop the whole optimistic batch and take server truth, rather than
+          // leaving a screen full of marks that never landed.
+          setAttendance(prev => prev.filter(a => !newRows.some(r => r.id === a.id)));
+          refreshFromCloud('ams_attendance', setAttendance);
+          throw new Error('The attendance import did not reach the server — check the connection and try again.');
+        });
+    } else {
+      saveToStorage('ams_attendance', updatedAttendance);
+    }
+
+    // One entry for the whole import. Per-person entries would each push the
+    // entire audit table.
+    addAuditLog(
+      correcting ? 'Attendance Correction (Closed Event)' : 'Attendance Bulk Import',
+      `Bulk marked ${newRows.length} participant(s) present for ${correcting ? 'closed event' : 'event'}: ` +
+      `${event.name} (${eventId}). ${skippedAlreadyPresent.length} already present, ${skippedUnknown.length} unknown.`
+    );
+
+    return {
+      success: true,
+      marked: newRows.length,
+      alreadyPresent: skippedAlreadyPresent.length,
+      unknown: skippedUnknown.length,
+      syncPromise
+    };
   };
 
   // Attendance corrections are Coordinator+ (decision D4). `allowClosed` is the
@@ -1411,6 +2252,7 @@ export const DbProvider = ({ children }) => {
       addEvent,
       updateEvent,
       markPresent,
+      markPresentBulk,
       undoAttendance,
       registerNewParticipant,
       publicSelfCheckIn,
@@ -1428,9 +2270,20 @@ export const DbProvider = ({ children }) => {
       isEventExpired,
       cloudStatus,
       uploadLocalSandbox,
-      setSabhas,
-      setKaryakars,
+      // setSabhas/setKaryakars are deliberately NOT exposed: writing them
+      // directly skipped the Admin gate that every lookup action enforces.
+      // Use addSabha / renameSabha / deleteSabha / addKaryakar / etc.
       addLookupEntries,
+      lookupUsage,
+      addSabha,
+      setSabhaArea,
+      renameSabha,
+      mergeSabhas,
+      deleteSabha,
+      addKaryakar,
+      renameKaryakar,
+      deleteKaryakar,
+      setKaryakarSabha,
       saveToStorage,
       addAuditLog
     }}>

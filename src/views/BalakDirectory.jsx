@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useDb } from '../context/DbContext';
+import { useAuth } from '../context/AuthContext';
 import ParticipantEditModal from '../components/ParticipantEditModal';
-import { Users, Search, Pencil } from 'lucide-react';
+import * as XLSX from 'xlsx';
+import { Users, Search, Pencil, Download } from 'lucide-react';
 
 // Every lifecycle status a record can hold. The directory can reach all of
 // them — unlike queryParticipants, which deliberately hides rejected, linked
@@ -24,7 +26,8 @@ const PAGE_SIZE = 30;
 // outside that scope simply is not there to correct. This is the screen for
 // managing the records themselves.
 export default function BalakDirectory() {
-  const { participants, sabhaNames, areas, areaOfSabha } = useDb();
+  const { participants, sabhaNames, areas, areaOfSabha, addAuditLog } = useDb();
+  const { canViewGuardianDetails } = useAuth();
 
   const [search, setSearch] = useState('');
   const [areaFilter, setAreaFilter] = useState('All');
@@ -53,19 +56,73 @@ export default function BalakDirectory() {
   const visible = sorted.slice(0, visibleCount);
   const isFiltered = Boolean(q) || areaFilter !== 'All' || sabhaFilter !== 'All' || statusFilter !== 'All';
 
+  // Export what is on screen, ready to edit and re-import.
+  //
+  // The Participant ID column is what makes the round trip work: identity is
+  // otherwise name + guardian number, so correcting either in the sheet would
+  // land as a NEW person rather than a fix to this one.
+  //
+  // Gated on canViewGuardianDetails because Reports masks that column as the
+  // literal "Restricted" — exporting that and re-importing it would overwrite
+  // real contact details with the word.
+  const handleExportForEditing = () => {
+    if (!canViewGuardianDetails || sorted.length === 0) return;
+    const rows = sorted.map(p => ({
+      'Participant ID': p.id,
+      'Name': p.name,
+      // "Mobile" so the importer's phone field claims this column; a header of
+      // just "Guardian Number" matches no phone synonym and would be dropped.
+      'Guardian Mobile Number': p.phone || '',
+      'Mandal-Sabha': p.sabha,
+      'Karyakar Name': p.karyakar,
+      'Guardian Contact Details': p.guardianDetails || '',
+      'Area (reference only)': areaOfSabha(p.sabha),
+      'Status (reference only)': p.status
+    }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Balak Registry');
+    XLSX.writeFile(wb, 'balak_registry.xlsx');
+    addAuditLog('Export Balak Registry', `Exported ${rows.length} participant record(s) for editing.`);
+  };
+
   return (
     <div className="container-padding animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
 
       <div className="card" style={{ background: 'linear-gradient(to right, var(--bg-secondary), rgba(var(--accent-rgb), 0.02))' }}>
-        <h3 style={{ fontSize: '1.25rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <Users color="var(--accent)" size={22} />
-          <span>Balak Registry</span>
-        </h3>
-        <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: 1.6, margin: 0 }}>
-          Every participant in the system, across all sabhas and events. Search for someone and
-          correct their details here — this is the only place that also reaches archived and
-          rejected records.
-        </p>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 320px' }}>
+            <h3 style={{ fontSize: '1.25rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <Users color="var(--accent)" size={22} />
+              <span>Balak Registry</span>
+            </h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: 1.6, margin: 0 }}>
+              Every participant in the system, across all sabhas and events. Search for someone and
+              correct their details here — this is the only place that also reaches archived and
+              rejected records.
+            </p>
+          </div>
+
+          {canViewGuardianDetails && (
+            <button
+              onClick={handleExportForEditing}
+              className="btn btn-secondary"
+              style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', whiteSpace: 'nowrap' }}
+              disabled={sorted.length === 0}
+              title="Download these rows to edit in Excel and import back through Excel Import"
+            >
+              <Download size={14} />
+              <span>Export for editing ({sorted.length})</span>
+            </button>
+          )}
+        </div>
+
+        {canViewGuardianDetails && (
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', lineHeight: 1.6, margin: '0.75rem 0 0' }}>
+            The export carries a <strong>Participant ID</strong> column. Keep it: it is what lets Excel
+            Import update these exact people, so you can correct a name or a guardian number instead of
+            creating a second record. A blank cell means "leave unchanged", never "clear this field".
+          </p>
+        )}
       </div>
 
       {/* Filters */}
