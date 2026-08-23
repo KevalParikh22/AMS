@@ -171,9 +171,19 @@ create policy karyakars_write on public.karyakars
 -- Events: readable by anyone (shared links show event info); writes Coordinator+.
 drop policy if exists events_read on public.events;
 create policy events_read on public.events for select using (true);
+-- Insert/update are Coordinator+, but DELETE is Admin only. This used to be one
+-- `for all` policy, and in Postgres FOR ALL covers DELETE — so any coordinator
+-- could remove an event straight through the API, taking every attendance row
+-- with it via the cascade below. Narrowed to match participants_delete.
 drop policy if exists events_write on public.events;
 create policy events_write on public.events
-  for all using (public.has_permission('Coordinator')) with check (public.has_permission('Coordinator'));
+  for insert with check (public.has_permission('Coordinator'));
+drop policy if exists events_update on public.events;
+create policy events_update on public.events
+  for update using (public.has_permission('Coordinator')) with check (public.has_permission('Coordinator'));
+drop policy if exists events_delete on public.events;
+create policy events_delete on public.events
+  for delete using (public.has_permission('Admin'));
 
 -- Participants: read by any ENABLED account (never anonymous — this table holds
 -- guardian contact details). The PUBLIC form may INSERT but never read the

@@ -268,12 +268,17 @@ export default function AttendanceDesk({ setView, selectedEventId, setSelectedEv
   // Find active events (expired events are effectively closed)
   const activeEvents = events.filter(e => getEffectiveStatus(e) === 'Active');
 
-  // Sync selected event id if not set and active events exist
+  // Adopt an active event when none is selected — and recover when the selected
+  // one disappears. This only filled a BLANK id before, so an event deleted or
+  // closed on another device left the desk stuck on an empty state it could not
+  // clear. Reports already self-heals the same way.
   useEffect(() => {
-    if (!selectedEventId && activeEvents.length > 0) {
+    if (activeEvents.length === 0) return;
+    const stillValid = events.some(e => e.id === selectedEventId);
+    if (!selectedEventId || !stillValid) {
       setSelectedEventId(activeEvents[0].id);
     }
-  }, [activeEvents, selectedEventId]);
+  }, [activeEvents, events, selectedEventId, setSelectedEventId]);
 
   // Execute query whenever participants or query changes
   useEffect(() => {
