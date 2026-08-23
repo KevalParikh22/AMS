@@ -108,6 +108,9 @@ Completed 2026-08-23, from operating a real three-day shibir.
 - [x] **Duplicate detection by mandal + name** — Data Quality keyed on exact name across the whole roster, so common names repeating across mandals buried the real duplicates. The name key now includes the mandal; guardian-number matching is unchanged so siblings still surface. The review queue gained the matching rule, and merge results are now reported instead of discarded.
 - [x] **Mandal → area mapping** — sabhas became `{ name, area }` objects (`migrateSabhasList`; views use the derived `sabhaNames`), with a `sabhas.area` column, an area control and CSV mapping import in Admin Control, an area rollup in the Sabha Summary, and an area filter in the Balak Registry. Areas are a reporting grouping only; events are still scoped to one sabha or all.
 
+- [x] **Attendance desk filtering and sorting** — the desk had search only, and an empty search listed the whole roster in insertion order. Adds check-in status / mandal / karyakar filters and a sort dropdown (best match, name, mandal, recently checked in), with an "everyone has checked in" empty state. `SwipeTrack` moved to module scope: as an inner component it was remounted on every parent render, discarding an in-progress swipe.
+- [x] **Sortable report tables** — clickable headers on all five Reports tables via `useTableSort` + `SortableTh`, plus area and karyakar filters. Sorting is applied at the array-definition site, so the Excel exports and QR badge sheet follow the on-screen order.
+
 Note for existing deployments: re-run `supabase/schema.sql` to add the `area` column. Existing sabha rows keep their data and default to `Unassigned` — assign areas from Admin Control or the mapping CSV.
 
 ## Cross-cutting / engineering

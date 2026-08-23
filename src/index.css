@@ -308,6 +308,48 @@ select.form-control {
   border-bottom: 1px solid var(--border-color);
 }
 
+/* Sortable column headers — additive to .custom-table th above, so headers
+   without the class (action columns) are untouched. */
+.custom-table th.sortable-th {
+  cursor: pointer;
+  user-select: none;
+  transition: var(--transition-fast);
+}
+
+.custom-table th.sortable-th:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-secondary);
+}
+
+.custom-table th.sortable-th:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The active column is marked by colour as well as the arrow — the arrow alone
+   is easy to miss, and colour survives a screenshot. */
+.custom-table th.sortable-th.is-sorted {
+  color: var(--accent);
+}
+
+.sortable-th-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+
+/* Rendered but transparent, so the idle arrow already occupies its width: the
+   header text does not jump sideways when a column becomes active. */
+.sortable-th-idle {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.custom-table th.sortable-th:hover .sortable-th-idle {
+  opacity: 0.45;
+}
+
 .custom-table td {
   padding: 1rem 1.5rem;
   font-size: 0.9rem;
