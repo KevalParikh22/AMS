@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { useDb } from '../context/DbContext';
 import { extractGuardianPhone, normalizePhone, participantKey } from '../lib/participantIdentity';
 import { autoMapHeaders } from '../lib/columnMapping';
+import AttendanceImport from './AttendanceImport';
 import * as XLSX from 'xlsx';
 import {
   UploadCloud,
@@ -47,6 +48,8 @@ export default function ExcelImport() {
   const [lookupsCreated, setLookupsCreated] = useState(null);
   const [importSummary, setImportSummary] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
+  // 'roster' edits the participant registry; 'attendance' marks people present.
+  const [mode, setMode] = useState('roster');
 
   const fileInputRef = useRef(null);
 
@@ -359,9 +362,29 @@ export default function ExcelImport() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  const tabStyle = (id) => ({
+    background: 'none',
+    border: 'none',
+    borderBottom: mode === id ? '2px solid var(--accent)' : 'none',
+    color: mode === id ? 'var(--accent)' : 'var(--text-secondary)',
+    padding: '0.75rem 1.5rem',
+    cursor: 'pointer',
+    fontSize: '1rem',
+    fontWeight: 600
+  });
+
   return (
     <div className="container-padding animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-      
+
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', gap: '1rem' }}>
+        <button onClick={() => setMode('roster')} style={tabStyle('roster')}>Roster Import</button>
+        <button onClick={() => setMode('attendance')} style={tabStyle('attendance')}>Attendance Import</button>
+      </div>
+
+      {mode === 'attendance' && <AttendanceImport />}
+
+      {mode === 'roster' && (
+      <>
       {/* Informational Guidelines Header */}
       <div className="card" style={{
         background: 'linear-gradient(to right, var(--bg-secondary), rgba(var(--accent-rgb), 0.02))'
@@ -692,6 +715,9 @@ export default function ExcelImport() {
         </div>
       )}
       
+      </>
+      )}
+
       <style>{`
         .upload-dropzone:hover {
           border-color: var(--accent) !important;

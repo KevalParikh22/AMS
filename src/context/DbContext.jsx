@@ -984,6 +984,109 @@ export const DbProvider = ({ children }) => {
     return { success: true, attendance: newAttendance, syncPromise };
   };
 
+  // Mark many people present in one operation.
+  //
+  // This exists because markPresent CANNOT be called in a loop. It reads the
+  // `attendance` state captured in the current render — both for its duplicate
+  // check and to build `[...attendance, row]` — and that value does not change
+  // between synchronous calls. Every iteration would therefore rebuild the array
+  // from the same starting point, so only the LAST mark would survive in state,
+  // and the duplicate guard would be blind to marks made earlier in the loop.
+  // It would also write one audit entry per person, each of which pushes the
+  // entire audit table.
+  //
+  // So: guards once, dedupe against one snapshot, one state update, one write,
+  // one audit entry.
+  const markPresentBulk = (eventId, participantIds, { allowClosed = false } = {}) => {
+    if (!user) {
+      return { success: false, message: 'Sign in required to mark attendance.' };
+    }
+    const event = events.find(e => e.id === eventId);
+    if (!event) return { success: false, message: 'Event not found' };
+    const isClosed = getEffectiveStatus(event) === 'Closed';
+    const correcting = isClosed && allowClosed && hasPermission(ROLES.ADMIN);
+    if (isClosed && !correcting) {
+      return { success: false, message: 'Cannot register attendance: Event is closed.' };
+    }
+
+    const alreadyPresent = new Set(
+      attendance.filter(a => a.eventId === eventId).map(a => a.participantId)
+    );
+    const knownIds = new Set(participants.map(p => p.id));
+
+    const newRows = [];
+    const skippedAlreadyPresent = [];
+    const skippedUnknown = [];
+    const seenInBatch = new Set();
+    const markedAt = new Date().toISOString();
+
+    participantIds.forEach(participantId => {
+      if (!knownIds.has(participantId)) { skippedUnknown.push(participantId); return; }
+      if (alreadyPresent.has(participantId)) { skippedAlreadyPresent.push(participantId); return; }
+      // The same person listed twice in one sheet must not produce two rows.
+      if (seenInBatch.has(participantId)) return;
+      seenInBatch.add(participantId);
+      newRows.push({
+        id: uniqueId('A-'),
+        eventId,
+        participantId,
+        status: 'Present',
+        markedAt,
+        markedBy: user.name
+      });
+    });
+
+    if (newRows.length === 0) {
+      return {
+        success: true,
+        marked: 0,
+        alreadyPresent: skippedAlreadyPresent.length,
+        unknown: skippedUnknown.length,
+        message: 'Nobody new to mark present.'
+      };
+    }
+
+    const updatedAttendance = [...attendance, ...newRows];
+    setAttendance(updatedAttendance);
+
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_attendance', JSON.stringify(updatedAttendance));
+      // upsertRows, not repeated insertRow: attendance names the composite
+      // (event_id, participant_id) as its conflict target, so anyone another
+      // device marked in the meantime is skipped rather than failing the batch.
+      syncPromise = trackWrite('ams_attendance', upsertRows('ams_attendance', newRows))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Bulk attendance import failed:', err);
+          setCloudStatus('error');
+          // Drop the whole optimistic batch and take server truth, rather than
+          // leaving a screen full of marks that never landed.
+          setAttendance(prev => prev.filter(a => !newRows.some(r => r.id === a.id)));
+          refreshFromCloud('ams_attendance', setAttendance);
+          throw new Error('The attendance import did not reach the server — check the connection and try again.');
+        });
+    } else {
+      saveToStorage('ams_attendance', updatedAttendance);
+    }
+
+    // One entry for the whole import. Per-person entries would each push the
+    // entire audit table.
+    addAuditLog(
+      correcting ? 'Attendance Correction (Closed Event)' : 'Attendance Bulk Import',
+      `Bulk marked ${newRows.length} participant(s) present for ${correcting ? 'closed event' : 'event'}: ` +
+      `${event.name} (${eventId}). ${skippedAlreadyPresent.length} already present, ${skippedUnknown.length} unknown.`
+    );
+
+    return {
+      success: true,
+      marked: newRows.length,
+      alreadyPresent: skippedAlreadyPresent.length,
+      unknown: skippedUnknown.length,
+      syncPromise
+    };
+  };
+
   // Attendance corrections are Coordinator+ (decision D4). `allowClosed` is the
   // same Admin-only post-close override as markPresent.
   const undoAttendance = (eventId, participantId, { allowClosed = false } = {}) => {
@@ -1475,6 +1578,7 @@ export const DbProvider = ({ children }) => {
       addEvent,
       updateEvent,
       markPresent,
+      markPresentBulk,
       undoAttendance,
       registerNewParticipant,
       publicSelfCheckIn,
