@@ -160,18 +160,33 @@ export function pushTable(storageKey, rows) {
         .upsert(mapped, { onConflict: cfg.key, ignoreDuplicates: !!cfg.immutableRows });
       if (error) throw new Error(`${cfg.table} upsert: ${error.message}`);
     }
-    if (!cfg.appendOnly) {
+    // A client must never be able to say "delete everything". An empty array
+    // used to fall through to `delete where key != ''`, which matches every
+    // row — so a device that had simply failed to load anything could wipe the
+    // table. "I have no rows" means nothing to reconcile, not delete them all.
+    // Deliberate wipes go through wipeTable().
+    if (!cfg.appendOnly && mapped.length > 0) {
       const keep = mapped.map(r => r[cfg.key]);
-      const del = supabase.from(cfg.table).delete();
-      const { error } = keep.length > 0
-        ? await del.not(cfg.key, 'in', `(${keep.map(k => `"${String(k).replace(/"/g, '')}"`).join(',')})`)
-        : await del.neq(cfg.key, '');
+      const { error } = await supabase
+        .from(cfg.table)
+        .delete()
+        .not(cfg.key, 'in', `(${keep.map(k => `"${String(k).replace(/"/g, '')}"`).join(',')})`);
       if (error) throw new Error(`${cfg.table} prune: ${error.message}`);
     }
   };
 
   pending[storageKey] = (pending[storageKey] || Promise.resolve()).then(run, run);
   return pending[storageKey];
+}
+
+// Delete every row in a table. Separated from pushTable deliberately: emptying
+// a table must be an explicit act (Admin Control's wipe / factory reset), never
+// something that falls out of pushing an empty array.
+export async function wipeTable(storageKey) {
+  const cfg = TABLE_MAP[storageKey];
+  if (!cfg || !supabase) return;
+  const { error } = await supabase.from(cfg.table).delete().neq(cfg.key, '');
+  if (error) throw new Error(`${cfg.table} wipe: ${error.message}`);
 }
 
 // Insert a single row, with no upsert and no prune.
