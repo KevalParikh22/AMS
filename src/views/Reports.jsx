@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import QrCode from '../components/QrCode';
 import Modal from '../components/Modal';
 import ParticipantEditModal from '../components/ParticipantEditModal';
-import { participantKey } from '../lib/participantIdentity';
+import { participantKey, sabhaNameKey } from '../lib/participantIdentity';
 import * as XLSX from 'xlsx';
 import {
   Download,
@@ -205,7 +205,10 @@ export default function Reports() {
     activeParticipants.forEach(p => {
       const keys = [];
       if (p.phone) keys.push('phone:' + p.phone.trim());
-      keys.push('name:' + p.name.toLowerCase().trim());
+      // Name + mandal, not name alone. A shared name across two different
+      // mandals is two different balaks, and flagging those buried the real
+      // duplicates under false ones.
+      keys.push('sabhaname:' + sabhaNameKey(p.sabha, p.name));
       keys.forEach(key => {
         if (!byKey.has(key)) byKey.set(key, []);
         byKey.get(key).push(p);
@@ -1175,6 +1178,15 @@ export default function Reports() {
       {activeTab === 'data-quality' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
 
+          {reviewMsg && (
+            <div
+              className={`badge ${reviewMsg.ok ? 'badge-success' : 'badge-danger'}`}
+              style={{ display: 'block', padding: '0.6rem 0.9rem', fontSize: '0.85rem' }}
+            >
+              {reviewMsg.text}
+            </div>
+          )}
+
           {/* Possible duplicates with merge actions */}
           <div className="glass-panel" style={{ padding: '1.5rem', borderRadius: 'var(--radius-md)' }}>
             <h3 style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -1182,7 +1194,10 @@ export default function Reports() {
               <span>Possible Duplicate Records</span>
             </h3>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.5rem' }}>
-              Active participants sharing a phone number or exact name. Merging moves attendance history to the record you keep and retains the other as a linked reference.
+              Active participants sharing a guardian number, or carrying the same name within the same
+              mandal. A name repeated across two different mandals is two different balaks, so it is not
+              flagged. Merging moves attendance history to the record you keep and retains the other as a
+              linked reference.
             </p>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
@@ -1194,7 +1209,9 @@ export default function Reports() {
                   padding: '1.25rem'
                 }}>
                   <div style={{ fontSize: '0.8rem', color: 'var(--warning)', fontWeight: 600, marginBottom: '0.75rem' }}>
-                    Shared {group.key.startsWith('phone:') ? `phone ${group.key.slice(6)}` : `name "${group.members[0].name}"`}
+                    {group.key.startsWith('phone:')
+                      ? `Shared guardian number ${group.key.slice(6)} — may be siblings`
+                      : `Same name "${group.members[0].name}" in the same mandal (${group.members[0].sabha})`}
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                     {group.members.map(m => (
@@ -1209,7 +1226,12 @@ export default function Reports() {
                               key={other.id}
                               onClick={() => {
                                 if (window.confirm(`Merge "${other.name}" (${other.id}) INTO "${m.name}" (${m.id})? Attendance history moves to ${m.name}.`)) {
-                                  mergeParticipants(m.id, other.id);
+                                  // The result used to be discarded, so a refused
+                                  // merge looked exactly like a successful one.
+                                  reportReview(
+                                    mergeParticipants(m.id, other.id),
+                                    `Merged ${other.name} into ${m.name}. Attendance history moved.`
+                                  );
                                 }
                               }}
                               className="btn btn-secondary"
@@ -1366,7 +1388,12 @@ export default function Reports() {
                     return { ...exist, reason: 'Same name and guardian number', confident: true };
                   }
                   if (samePhone) return { ...exist, reason: 'Same guardian number — may be a sibling', confident: false };
-                  if (sameName) return { ...exist, reason: 'Same name — different guardian number', confident: false };
+                  // Same name inside one mandal is a strong signal even without a
+                  // matching number; the same name in a different mandal is not.
+                  if (sameName && sabhaNameKey(exist.sabha, exist.name) === sabhaNameKey(p.sabha, p.name)) {
+                    return { ...exist, reason: 'Same name in the same mandal', confident: true };
+                  }
+                  if (sameName) return { ...exist, reason: 'Same name — different mandal, likely a different balak', confident: false };
                   return null;
                 })
                 .filter(Boolean)
