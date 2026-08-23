@@ -5,6 +5,8 @@ import QrCode from '../components/QrCode';
 import Modal from '../components/Modal';
 import ParticipantEditModal from '../components/ParticipantEditModal';
 import { participantKey, sabhaNameKey } from '../lib/participantIdentity';
+import { useTableSort } from '../lib/tableSort';
+import SortableTh from '../components/SortableTh';
 import * as XLSX from 'xlsx';
 import {
   Download,
@@ -19,6 +21,8 @@ import {
   Pencil
 } from 'lucide-react';
 
+const PAGE_SIZE = 50;
+
 export default function Reports() {
   const {
     events,
@@ -28,6 +32,7 @@ export default function Reports() {
     undoAttendance,
     getEffectiveStatus,
     areaOfSabha,
+    areas,
     approveParticipant,
     rejectParticipant,
     linkParticipant,
@@ -46,9 +51,23 @@ export default function Reports() {
   const [statusFilter, setStatusFilter] = useState('All');
   const [activeTab, setActiveTab] = useState('attendance'); // 'attendance' | 'multi-day' | 'sabha-summary' | 'data-quality' | 'pending-review'
 
+  const [areaFilter, setAreaFilter] = useState('All');
+  const [karyakarFilter, setKaryakarFilter] = useState('All');
+
   // Multi-day report: which events are combined, and the minimum days filter
   const [multiEventIds, setMultiEventIds] = useState([]);
   const [minDaysFilter, setMinDaysFilter] = useState(0);
+
+  // One sort per table — five independent states, so sorting the roster cannot
+  // reorder a summary. These must be declared HERE, with the first state
+  // cluster: reportRoster below consumes rosterSort, and a `const` declared
+  // further down the body is in the temporal dead zone at that point, which is
+  // a render-time ReferenceError rather than a lint warning.
+  const rosterSort = useTableSort();
+  const multiSort = useTableSort();
+  const areaSort = useTableSort();
+  const mandalSort = useTableSort();
+  const exceptionSort = useTableSort();
 
   // The initial useState above reads `events` on the first render only, which in
   // cloud mode is before anything has loaded — so it settled on '' and never
@@ -66,6 +85,9 @@ export default function Reports() {
 
   // Extract unique Sabhas from participants list
   const uniqueSabhas = ['All', ...new Set(participants.map(p => p.sabha))];
+  // Derived from the roster, like uniqueSabhas, so a karyakar with no balaks
+  // never appears as a dead choice.
+  const uniqueKaryakars = ['All', ...new Set(participants.map(p => p.karyakar).filter(Boolean))].sort();
 
   // Who was actually marked present for this event, regardless of who was
   // expected. This is the source of truth for the "Present" figure.
@@ -94,6 +116,10 @@ export default function Reports() {
   // View-only filters: these shape the table, never the aggregates.
   const matchesView = (p) => {
     if (selectedSabha !== 'All' && p.sabha !== selectedSabha) return false;
+    // A participant's sabha need not exist in the lookup, so resolve the area
+    // through areaOfSabha rather than reading a field.
+    if (areaFilter !== 'All' && areaOfSabha(p.sabha) !== areaFilter) return false;
+    if (karyakarFilter !== 'All' && p.karyakar !== karyakarFilter) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       return p.name.toLowerCase().includes(q) ||
@@ -103,7 +129,11 @@ export default function Reports() {
     return true;
   };
 
-  const reportRoster = [...targetParticipants, ...unexpectedPresent]
+  // Off-roster people sat at the bottom only because they were concatenated
+  // last. Now that a column sort can override the order, make that grouping
+  // explicit — and because sorting is stable, (off-roster, name) also becomes
+  // the automatic tiebreak whenever the chosen column has equal values.
+  const rosterBase = [...targetParticipants, ...unexpectedPresent]
     .filter(matchesView)
     .map(p => ({
       ...p,
@@ -115,7 +145,12 @@ export default function Reports() {
       if (statusFilter === 'Present') return row.present;
       if (statusFilter === 'Absent') return !row.present;
       return true;
-    });
+    })
+    .sort((a, b) => Number(a.offRoster) - Number(b.offRoster) || a.name.localeCompare(b.name));
+
+  // Sorted here rather than in the JSX, so the Excel exports and the QR badge
+  // sheet — which all iterate reportRoster — come out in the order on screen.
+  const reportRoster = rosterSort.sorted(rosterBase);
 
   // Aggregates. Present counts everyone actually checked in — including the
   // off-roster people — so it always matches the desk and the Dashboard.
@@ -184,10 +219,12 @@ export default function Reports() {
   // silently match nobody, which reads as "no data" rather than "bad filter".
   const effectiveMinDays = Math.min(minDaysFilter, multiEvents.length);
 
-  const multiVisible = multiRoster
+  const multiBase = multiRoster
     .filter(matchesView)
     .filter(row => row.daysAttended >= effectiveMinDays)
     .sort((a, b) => b.daysAttended - a.daysAttended || a.name.localeCompare(b.name));
+
+  const multiVisible = multiSort.sorted(multiBase);
 
   // How many people attended each possible number of days: the "who came all
   // three days" answer, and its tail.
@@ -226,19 +263,27 @@ export default function Reports() {
     });
     return groups;
   })();
-  const exceptionRecords = participants.filter(
-    p => p.status === 'rejected' || p.status === 'linked' || p.status === 'archived'
-  );
+  const exceptionBase = participants
+    .filter(p => p.status === 'rejected' || p.status === 'linked' || p.status === 'archived')
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const exceptionRecords = exceptionSort.sorted(exceptionBase);
   const [archiveSearch, setArchiveSearch] = useState('');
   const [showBadgeSheet, setShowBadgeSheet] = useState(false);
-  const [rosterVisible, setRosterVisible] = useState(50);
+  const [rosterVisible, setRosterVisible] = useState(PAGE_SIZE);
   const [editingParticipant, setEditingParticipant] = useState(null);
   const [reviewMsg, setReviewMsg] = useState(null);
+
+  // Paging resets when the RESULT SET changes. Deliberately not on sort: that
+  // reorders the same rows, so the offset stays meaningful and scrolling back
+  // through a long roster is not undone by clicking a header.
+  useEffect(() => {
+    setRosterVisible(PAGE_SIZE);
+  }, [selectedEventId, selectedSabha, areaFilter, karyakarFilter, statusFilter, searchQuery]);
 
   // Sabha-wise attendance summary across events (Phase 0 decision D8).
   // Draft events are excluded; expected = members x relevant events.
   const summaryEvents = events.filter(e => e.status !== 'Draft');
-  const sabhaSummary = [...new Set(participants.filter(p => p.status === 'approved').map(p => p.sabha))]
+  const sabhaSummaryBase = [...new Set(participants.filter(p => p.status === 'approved').map(p => p.sabha))]
     .sort()
     .map(sabhaName => {
       const members = participants.filter(p => p.status === 'approved' && p.sabha === sabhaName);
@@ -265,11 +310,13 @@ export default function Reports() {
     });
 
   // Areas roll several mandals into one group. Summing the sabha rows rather
-  // than recomputing keeps the two tables incapable of disagreeing.
-  const areaSummary = [...new Set(sabhaSummary.map(r => r.area))]
+  // than recomputing keeps the two tables incapable of disagreeing. Built from
+  // the BASE array, not the sorted one, so a column sort on the mandal table
+  // cannot perturb the area totals.
+  const areaSummaryBase = [...new Set(sabhaSummaryBase.map(r => r.area))]
     .sort()
     .map(area => {
-      const rows = sabhaSummary.filter(r => r.area === area);
+      const rows = sabhaSummaryBase.filter(r => r.area === area);
       const members = rows.reduce((s, r) => s + r.members, 0);
       const presentMarks = rows.reduce((s, r) => s + r.presentMarks, 0);
       const expected = rows.reduce((s, r) => s + r.expected, 0);
@@ -282,6 +329,9 @@ export default function Reports() {
         percentage: expected > 0 ? Math.round((presentMarks / expected) * 100) : 0
       };
     });
+
+  const sabhaSummary = mandalSort.sorted(sabhaSummaryBase);
+  const areaSummary = areaSort.sorted(areaSummaryBase);
 
   // One row shape for all three places that emit the sabha summary, so an added
   // column can never reach some of them and not the others.
@@ -646,6 +696,33 @@ export default function Reports() {
             </div>
 
             <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Area</label>
+              <select
+                className="form-control"
+                value={areaFilter}
+                onChange={(e) => setAreaFilter(e.target.value)}
+              >
+                <option value="All">All areas</option>
+                {areas.map(a => (
+                  <option key={a} value={a}>{a}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Karyakar</label>
+              <select
+                className="form-control"
+                value={karyakarFilter}
+                onChange={(e) => setKaryakarFilter(e.target.value)}
+              >
+                {uniqueKaryakars.map(k => (
+                  <option key={k} value={k}>{k === 'All' ? 'All karyakars' : k}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group" style={{ marginBottom: 0 }}>
               <label className="form-label">Check-in Status</label>
               <select
                 className="form-control"
@@ -794,12 +871,12 @@ export default function Reports() {
               <table className="custom-table">
                 <thead>
                   <tr>
-                    <th>Attendee ID</th>
-                    <th>Full Name</th>
-                    <th>Phone</th>
-                    <th>Mandal-Sabha</th>
-                    <th>Karyakar</th>
-                    <th>Attendance Status</th>
+                    <SortableTh sortKey="id" sort={rosterSort}>Attendee ID</SortableTh>
+                    <SortableTh sortKey="name" sort={rosterSort}>Full Name</SortableTh>
+                    <SortableTh sortKey="phone" sort={rosterSort}>Phone</SortableTh>
+                    <SortableTh sortKey="sabha" sort={rosterSort}>Mandal-Sabha</SortableTh>
+                    <SortableTh sortKey="karyakar" sort={rosterSort}>Karyakar</SortableTh>
+                    <SortableTh sortKey="present" sort={rosterSort} firstDir="desc">Attendance Status</SortableTh>
                     {canCorrectClosed && <th>Correction</th>}
                   </tr>
                 </thead>
@@ -847,7 +924,7 @@ export default function Reports() {
                   {reportRoster.length > rosterVisible && (
                     <tr>
                       <td colSpan={canCorrectClosed ? 7 : 6} style={{ textAlign: 'center', padding: '0.75rem' }}>
-                        <button onClick={() => setRosterVisible(v => v + 50)} className="btn btn-secondary" style={{ padding: '0.5rem 1.5rem', fontSize: '0.85rem' }}>
+                        <button onClick={() => setRosterVisible(v => v + PAGE_SIZE)} className="btn btn-secondary" style={{ padding: '0.5rem 1.5rem', fontSize: '0.85rem' }}>
                           Show more ({reportRoster.length - rosterVisible} remaining)
                         </button>
                       </td>
@@ -969,10 +1046,26 @@ export default function Reports() {
                 padding: '1.25rem 1.5rem', borderRadius: 'var(--radius-md)',
                 display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', alignItems: 'end'
               }}>
+                {/* Area, Sabha, Karyakar and Search all live in the shared
+                    matchesView, so they narrow this tab too. They are rendered
+                    here as well rather than filtering it invisibly. */}
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Area</label>
+                  <select className="form-control" value={areaFilter} onChange={(e) => setAreaFilter(e.target.value)}>
+                    <option value="All">All areas</option>
+                    {areas.map(a => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
                 <div className="form-group" style={{ marginBottom: 0 }}>
                   <label className="form-label">Sabha Class</label>
                   <select className="form-control" value={selectedSabha} onChange={(e) => setSelectedSabha(e.target.value)}>
                     {uniqueSabhas.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Karyakar</label>
+                  <select className="form-control" value={karyakarFilter} onChange={(e) => setKaryakarFilter(e.target.value)}>
+                    {uniqueKaryakars.map(k => <option key={k} value={k}>{k === 'All' ? 'All karyakars' : k}</option>)}
                   </select>
                 </div>
                 <div className="form-group" style={{ marginBottom: 0 }}>
@@ -1017,13 +1110,13 @@ export default function Reports() {
                   <table className="custom-table">
                     <thead>
                       <tr>
-                        <th>Full Name</th>
-                        <th>Mandal-Sabha</th>
+                        <SortableTh sortKey="name" sort={multiSort}>Full Name</SortableTh>
+                        <SortableTh sortKey="sabha" sort={multiSort}>Mandal-Sabha</SortableTh>
                         {multiEvents.map(e => (
                           <th key={e.id} title={`${e.name} — ${e.sabhaMandalScope}`}>{e.date}</th>
                         ))}
-                        <th>Days Attended</th>
-                        <th>%</th>
+                        <SortableTh sortKey="daysAttended" sort={multiSort} firstDir="desc">Days Attended</SortableTh>
+                        <SortableTh sortKey="percentage" sort={multiSort} firstDir="desc">%</SortableTh>
                       </tr>
                     </thead>
                     <tbody>
@@ -1102,12 +1195,12 @@ export default function Reports() {
             <table className="custom-table">
               <thead>
                 <tr>
-                  <th>Area</th>
-                  <th>Mandals</th>
-                  <th>Participants</th>
-                  <th>Present Marks</th>
-                  <th>Expected Marks</th>
-                  <th>Attendance %</th>
+                  <SortableTh sortKey="area" sort={areaSort}>Area</SortableTh>
+                  <SortableTh sortKey="sabhaCount" sort={areaSort} firstDir="desc">Mandals</SortableTh>
+                  <SortableTh sortKey="members" sort={areaSort} firstDir="desc">Participants</SortableTh>
+                  <SortableTh sortKey="presentMarks" sort={areaSort} firstDir="desc">Present Marks</SortableTh>
+                  <SortableTh sortKey="expected" sort={areaSort} firstDir="desc">Expected Marks</SortableTh>
+                  <SortableTh sortKey="percentage" sort={areaSort} firstDir="desc">Attendance %</SortableTh>
                 </tr>
               </thead>
               <tbody>
@@ -1143,13 +1236,13 @@ export default function Reports() {
             <table className="custom-table">
               <thead>
                 <tr>
-                  <th>Area</th>
-                  <th>Mandal / Sabha</th>
-                  <th>Participants</th>
-                  <th>Events Held</th>
-                  <th>Present Marks</th>
-                  <th>Expected Marks</th>
-                  <th>Attendance %</th>
+                  <SortableTh sortKey="area" sort={mandalSort}>Area</SortableTh>
+                  <SortableTh sortKey="sabha" sort={mandalSort}>Mandal / Sabha</SortableTh>
+                  <SortableTh sortKey="members" sort={mandalSort} firstDir="desc">Participants</SortableTh>
+                  <SortableTh sortKey="eventCount" sort={mandalSort} firstDir="desc">Events Held</SortableTh>
+                  <SortableTh sortKey="presentMarks" sort={mandalSort} firstDir="desc">Present Marks</SortableTh>
+                  <SortableTh sortKey="expected" sort={mandalSort} firstDir="desc">Expected Marks</SortableTh>
+                  <SortableTh sortKey="percentage" sort={mandalSort} firstDir="desc">Attendance %</SortableTh>
                 </tr>
               </thead>
               <tbody>
@@ -1373,11 +1466,11 @@ export default function Reports() {
               <table className="custom-table">
                 <thead>
                   <tr>
-                    <th>ID</th>
-                    <th>Name</th>
-                    <th>Phone</th>
-                    <th>Status</th>
-                    <th>Linked To</th>
+                    <SortableTh sortKey="id" sort={exceptionSort}>ID</SortableTh>
+                    <SortableTh sortKey="name" sort={exceptionSort}>Name</SortableTh>
+                    <SortableTh sortKey="phone" sort={exceptionSort}>Phone</SortableTh>
+                    <SortableTh sortKey="status" sort={exceptionSort}>Status</SortableTh>
+                    <SortableTh sortKey="linkedToId" sort={exceptionSort}>Linked To</SortableTh>
                     <th>Action</th>
                   </tr>
                 </thead>
