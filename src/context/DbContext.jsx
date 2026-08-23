@@ -1561,24 +1561,148 @@ export const DbProvider = ({ children }) => {
     return newEvent;
   };
 
-  const updateEvent = (eventId, updatedFields) => {
+  // Only these may be changed. The old version blind-spread `updatedFields`, so
+  // a caller could write any key at all — including `id`, which would corrupt
+  // the row. updateParticipant already whitelists for the same reason.
+  const EDITABLE_EVENT_FIELDS = ['name', 'date', 'startTime', 'endTime', 'sabhaMandalScope', 'status'];
+
+  // `allowClosed` is the same Admin-only post-close override as markPresent:
+  // events auto-close past their end time, so without it a typo in a finished
+  // event's name could never be corrected.
+  //
+  // Note the reopen path also comes through here. Because getEffectiveStatus
+  // derives Closed from date + endTime, setting status back to 'Active' alone
+  // does nothing for an expired event — the end time has to move too.
+  const updateEvent = (eventId, updatedFields, { allowClosed = false } = {}) => {
     if (!hasPermission(ROLES.COORDINATOR)) {
-      return { error: 'Only coordinators or admins can manage events.' };
+      return { success: false, message: 'Only coordinators or admins can manage events.' };
     }
-    const updatedEvents = events.map(e => {
-      if (e.id === eventId) {
-        return { ...e, ...updatedFields };
-      }
-      return e;
+    const original = events.find(e => e.id === eventId);
+    if (!original) return { success: false, message: 'Event not found.' };
+
+    const isClosed = getEffectiveStatus(original) === 'Closed';
+    const correcting = isClosed && allowClosed && hasPermission(ROLES.ADMIN);
+    if (isClosed && !correcting) {
+      return { success: false, message: 'This event is closed. Only an administrator can change it.' };
+    }
+
+    const changes = {};
+    EDITABLE_EVENT_FIELDS.forEach(field => {
+      if (updatedFields[field] === undefined) return;
+      const value = String(updatedFields[field] ?? '').trim();
+      if (value !== '' && value !== original[field]) changes[field] = value;
     });
+    if (Object.keys(changes).length === 0) {
+      return { success: true, unchanged: true };
+    }
+
+    const updated = { ...original, ...changes };
+    const updatedEvents = events.map(e => (e.id === eventId ? updated : e));
     setEvents(updatedEvents);
-    saveToStorage('ams_events', updatedEvents);
-    
-    const originalEvent = events.find(e => e.id === eventId);
-    const details = Object.entries(updatedFields)
-      .map(([k, v]) => `${k} changed to "${v}"`)
+
+    let syncPromise;
+    if (isCloudMode) {
+      // Only the changed row. saveToStorage reconciles the whole table and
+      // prunes any event this device has not received — the same hazard already
+      // fixed for participants and attendance.
+      localStorage.setItem('ams_events', JSON.stringify(updatedEvents));
+      syncPromise = trackWrite('ams_events', upsertRows('ams_events', [updated]))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Event update failed:', err);
+          setCloudStatus('error');
+          refreshFromCloud('ams_events', setEvents);
+          throw new Error('That change did not reach the server — check the connection and try again.');
+        });
+    } else {
+      saveToStorage('ams_events', updatedEvents);
+    }
+
+    const details = Object.entries(changes)
+      .map(([k, v]) => `${k}: "${original[k]}" → "${v}"`)
       .join(', ');
-    addAuditLog('Event Update', `Updated event: "${originalEvent.name}" (${eventId}). Fields: ${details}`);
+    addAuditLog(
+      correcting ? 'Event Update (Closed Event)' : 'Event Update',
+      `Updated ${correcting ? 'closed ' : ''}event: "${original.name}" (${eventId}). ${details}`
+    );
+
+    return { success: true, event: updated, changes, syncPromise };
+  };
+
+  // Remove an event entirely (Admin only).
+  //
+  // Refused whenever any attendance references it. That is not merely caution:
+  // attendance.event_id is `on delete cascade`, so deleting an event with marks
+  // would silently destroy that day's entire register — and it would behave
+  // differently in the two modes, since localStorage has no cascade and would
+  // keep the rows as orphans instead. Only empty events can be deleted, so the
+  // question never arises.
+  const deleteEvent = (eventId) => {
+    if (!hasPermission(ROLES.ADMIN)) {
+      return { success: false, message: 'Only administrators can delete an event.' };
+    }
+    const target = events.find(e => e.id === eventId);
+    if (!target) return { success: false, message: 'Event not found.' };
+
+    const marks = attendance.filter(a => a.eventId === eventId).length;
+    if (marks > 0) {
+      return {
+        success: false,
+        hasAttendance: true,
+        marks,
+        message:
+          `"${target.name}" has ${marks} attendance record(s). Deleting it would destroy them permanently, ` +
+          `so it cannot be removed — close the event instead.`
+      };
+    }
+
+    // registeredForEventId is a plain string with no foreign key, so it would
+    // survive as a dangling id. Reports resolves a pending registration's
+    // link-and-mark through it, where a dead id silently fails to mark anyone.
+    const touchedParticipants = participants
+      .filter(p => p.registeredForEventId === eventId)
+      .map(p => ({ ...p, registeredForEventId: null }));
+    const nextParticipants = touchedParticipants.length
+      ? participants.map(p => (p.registeredForEventId === eventId ? { ...p, registeredForEventId: null } : p))
+      : participants;
+
+    const nextEvents = events.filter(e => e.id !== eventId);
+    setEvents(nextEvents);
+    if (touchedParticipants.length) setParticipants(nextParticipants);
+
+    let syncPromise;
+    if (isCloudMode) {
+      localStorage.setItem('ams_events', JSON.stringify(nextEvents));
+      if (touchedParticipants.length) {
+        localStorage.setItem('ams_participants', JSON.stringify(nextParticipants));
+      }
+      syncPromise = trackWrite('ams_events', (async () => {
+        // Clear the references BEFORE removing the event, so a failure never
+        // leaves a participant pointing at an id that no longer exists.
+        if (touchedParticipants.length) {
+          await trackWrite('ams_participants', upsertRows('ams_participants', touchedParticipants));
+        }
+        await deleteRow('ams_events', eventId);
+      })())
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Event delete failed:', err);
+          setCloudStatus('error');
+          refreshFromCloud('ams_events', setEvents);
+          throw new Error(`"${target.name}" could not be removed — check the connection and try again.`);
+        });
+    } else {
+      saveToStorage('ams_events', nextEvents);
+      if (touchedParticipants.length) saveToStorage('ams_participants', nextParticipants);
+    }
+
+    addAuditLog(
+      'Event Deleted',
+      `Deleted event "${target.name}" (${eventId}) scheduled ${target.date}. It had no attendance records.` +
+      (touchedParticipants.length ? ` Cleared the registration link on ${touchedParticipants.length} participant(s).` : '')
+    );
+
+    return { success: true, clearedRegistrations: touchedParticipants.length, syncPromise };
   };
 
   // Attendance Actions
@@ -2251,6 +2375,7 @@ export const DbProvider = ({ children }) => {
       importExcelData,
       addEvent,
       updateEvent,
+      deleteEvent,
       markPresent,
       markPresentBulk,
       undoAttendance,

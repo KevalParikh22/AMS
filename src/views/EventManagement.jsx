@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useDb } from '../context/DbContext';
+import { useAuth, ROLES } from '../context/AuthContext';
 import Modal from '../components/Modal';
 import QrCode from '../components/QrCode';
 import {
@@ -9,13 +10,13 @@ import {
   Copy,
   Clock,
   Users,
-  ShieldAlert,
   Play,
   Archive,
-  Eye,
   AlertTriangle,
   Share2,
-  RefreshCw
+  RefreshCw,
+  Pencil,
+  Trash2
 } from 'lucide-react';
 
 // The public link is query-string routed, so it works from whatever path the
@@ -26,9 +27,22 @@ const buildShareUrl = (eventId) =>
   `${window.location.origin}${window.location.pathname}?view=shared-registration${eventId ? `&eventId=${eventId}` : ''}`;
 
 export default function EventManagement() {
-  const { events, addEvent, updateEvent, sabhaNames, getEffectiveStatus, isEventExpired } = useDb();
+  const { events, addEvent, updateEvent, deleteEvent, attendance, sabhaNames, getEffectiveStatus, isEventExpired } = useDb();
+  const { hasPermission } = useAuth();
+  // Closed events are Admin-only to change, matching the post-close
+  // attendance correction already in place.
+  const canEditClosed = hasPermission(ROLES.ADMIN);
+  const editingClosed = editingEventId
+    ? (() => { const ev = events.find(e => e.id === editingEventId); return ev ? getEffectiveStatus(ev) === 'Closed' : false; })()
+    : false;
   
   const [showCreateModal, setShowCreateModal] = useState(false);
+  // Set while editing an existing event: the same form serves both, so the
+  // create and edit fields cannot drift apart.
+  const [editingEventId, setEditingEventId] = useState(null);
+  const [reopenEvent, setReopenEvent] = useState(null);
+  const [reopenUntil, setReopenUntil] = useState('');
+  const [msg, setMsg] = useState(null);
   const [copiedEventId, setCopiedEventId] = useState(null);
   const [shareEventId, setShareEventId] = useState(null);
   const [usePermanent, setUsePermanent] = useState(true);
@@ -41,27 +55,95 @@ export default function EventManagement() {
   const [sabhaScope, setSabhaScope] = useState('All Sabhas');
   const [status, setStatus] = useState('Draft');
 
-  const handleCreateEvent = (e) => {
-    e.preventDefault();
-    if (!name.trim()) return;
+  // Every action reports its outcome. The status toggle used to discard
+  // updateEvent's return entirely, so a refusal looked identical to success.
+  const report = (result, successText) => {
+    if (!result?.success) {
+      setMsg({ ok: false, text: result?.message || 'That could not be completed.' });
+      setTimeout(() => setMsg(null), 9000);
+      return false;
+    }
+    setMsg({ ok: true, text: result.unchanged ? 'Nothing to change.' : successText });
+    result.syncPromise?.catch(err => setMsg({ ok: false, text: err.message }));
+    setTimeout(() => setMsg(null), 9000);
+    return true;
+  };
 
-    addEvent({
-      name,
-      date,
-      startTime,
-      endTime,
-      sabhaMandalScope: sabhaScope,
-      status
-    });
-
-    // Reset Form
+  const resetForm = () => {
     setName('');
     setDate(new Date().toISOString().split('T')[0]);
     setStartTime('16:00');
     setEndTime('18:00');
     setSabhaScope('All Sabhas');
     setStatus('Draft');
+    setEditingEventId(null);
     setShowCreateModal(false);
+  };
+
+  const openEditModal = (event) => {
+    setEditingEventId(event.id);
+    setName(event.name);
+    setDate(event.date);
+    setStartTime(event.startTime || '16:00');
+    setEndTime(event.endTime || '18:00');
+    setSabhaScope(event.sabhaMandalScope || 'All Sabhas');
+    setStatus(event.status || 'Draft');
+    setShowCreateModal(true);
+  };
+
+  const handleSubmitEvent = (e) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    const fields = { name, date, startTime, endTime, sabhaMandalScope: sabhaScope, status };
+
+    if (editingEventId) {
+      const target = events.find(ev => ev.id === editingEventId);
+      const wasClosed = target && getEffectiveStatus(target) === 'Closed';
+      const result = updateEvent(editingEventId, fields, { allowClosed: wasClosed && canEditClosed });
+      if (!report(result, `Updated "${name}".`)) return;
+    } else {
+      addEvent(fields);
+      setMsg({ ok: true, text: `Created "${name}".` });
+      setTimeout(() => setMsg(null), 9000);
+    }
+    resetForm();
+  };
+
+  const handleDeleteEvent = (event) => {
+    const marks = attendance.filter(a => a.eventId === event.id).length;
+    if (marks > 0) {
+      // Say why before the confirm, rather than after a pointless prompt.
+      setMsg({
+        ok: false,
+        text: `"${event.name}" has ${marks} attendance record(s) and cannot be deleted — that register would be lost. Close it instead.`
+      });
+      setTimeout(() => setMsg(null), 9000);
+      return;
+    }
+    if (!window.confirm(`Delete "${event.name}" (${event.date})?\n\nIt has no attendance records, so nothing is lost. This cannot be undone.`)) return;
+    report(deleteEvent(event.id), `Deleted "${event.name}".`);
+  };
+
+  // Reopening an expired event means genuinely extending its window: because
+  // getEffectiveStatus derives Closed from date + endTime, flipping the status
+  // alone leaves it closed and the auto-close sweep re-persists that on reload.
+  const handleReopen = () => {
+    if (!reopenEvent || !reopenUntil) return;
+    const result = updateEvent(
+      reopenEvent.id,
+      { endTime: reopenUntil, date: new Date().toISOString().split('T')[0], status: 'Active' },
+      { allowClosed: true }
+    );
+    if (report(result, `"${reopenEvent.name}" is open again until ${reopenUntil}.`)) {
+      setReopenEvent(null);
+      setReopenUntil('');
+    }
+  };
+
+  const openReopenModal = (event) => {
+    const inTwoHours = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    setReopenUntil(`${String(inTwoHours.getHours()).padStart(2, '0')}:${String(inTwoHours.getMinutes()).padStart(2, '0')}`);
+    setReopenEvent(event);
   };
 
   const handleCopyLink = (eventId) => {
@@ -78,7 +160,11 @@ export default function EventManagement() {
     else if (current === 'Active') nextStatus = 'Closed';
     else if (current === 'Closed') nextStatus = 'Active'; // Reopen
 
-    updateEvent(event.id, { status: nextStatus });
+    const wasClosed = current === 'Closed';
+    report(
+      updateEvent(event.id, { status: nextStatus }, { allowClosed: wasClosed && canEditClosed }),
+      `"${event.name}" is now ${nextStatus}.`
+    );
   };
 
   return (
@@ -100,15 +186,64 @@ export default function EventManagement() {
         </button>
       </div>
 
+      {msg && (
+        <div className={`badge ${msg.ok ? 'badge-success' : 'badge-danger'}`}
+          style={{ display: 'block', padding: '0.85rem', fontSize: '0.85rem' }}>
+          {msg.text}
+        </div>
+      )}
+
+      {/* Reopen an event that has passed its end time.
+          Flipping the status is not enough on its own — getEffectiveStatus
+          derives Closed from date + endTime, so the window has to move too. */}
+      <Modal open={Boolean(reopenEvent)} onClose={() => setReopenEvent(null)} maxWidth="460px">
+        {reopenEvent && (
+          <>
+            <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '0.75rem' }}>
+              Reopen "{reopenEvent.name}"
+            </h3>
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem', lineHeight: 1.6 }}>
+              It ended at {reopenEvent.endTime} on {reopenEvent.date}, which is why it closed.
+            </p>
+            <div className="form-group">
+              <label className="form-label">Keep it open until (today)</label>
+              <input
+                type="time"
+                className="form-control"
+                value={reopenUntil}
+                onChange={(e) => setReopenUntil(e.target.value)}
+              />
+            </div>
+            <div className="badge badge-warning" style={{ display: 'block', padding: '0.75rem', fontSize: '0.8rem', lineHeight: 1.6 }}>
+              The event's recorded date and end time change to match, so it will read as having run today.
+              To fix a missed mark without moving the event, use correction mode on the Reports roster instead.
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', marginTop: '1.25rem' }}>
+              <button onClick={() => setReopenEvent(null)} className="btn btn-secondary" style={{ padding: '0.5rem 1rem' }}>Cancel</button>
+              <button onClick={handleReopen} className="btn btn-primary" style={{ padding: '0.5rem 1rem' }} disabled={!reopenUntil}>Reopen</button>
+            </div>
+          </>
+        )}
+      </Modal>
+
       {/* Modal Dialog for Event Creation */}
       <Modal
         open={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
+        onClose={resetForm}
         maxWidth="520px"
       >
-        <h3 style={{ fontSize: '1.25rem', marginBottom: '1.5rem', fontFamily: 'var(--font-display)' }}>Create Sabha Event</h3>
+        <h3 style={{ fontSize: '1.25rem', marginBottom: '1.5rem', fontFamily: 'var(--font-display)' }}>
+          {editingEventId ? 'Edit Sabha Event' : 'Create Sabha Event'}
+        </h3>
 
-        <form onSubmit={handleCreateEvent} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        {editingEventId && editingClosed && (
+          <div className="badge badge-warning" style={{ display: 'block', padding: '0.75rem', fontSize: '0.82rem', marginBottom: '1rem' }}>
+            This event is closed. Your change is recorded in the audit log as a correction against your name.
+            Editing the date or end time can also reopen it.
+          </div>
+        )}
+
+        <form onSubmit={handleSubmitEvent} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
           <div className="form-group">
             <label className="form-label">Event Assembly Name</label>
             <input
@@ -171,7 +306,7 @@ export default function EventManagement() {
           </div>
 
           <div className="form-group">
-            <label className="form-label">Initial Status</label>
+            <label className="form-label">{editingEventId ? 'Status' : 'Initial Status'}</label>
             <select
               className="form-control"
               value={status}
@@ -179,6 +314,9 @@ export default function EventManagement() {
             >
               <option value="Draft">Draft</option>
               <option value="Active">Active (Open for Attendance)</option>
+              {/* Only offered when editing: a new event is never created closed,
+                  but an existing one may already be. */}
+              {editingEventId && <option value="Closed">Closed</option>}
             </select>
           </div>
 
@@ -209,6 +347,7 @@ export default function EventManagement() {
         {events.map((event) => {
           const effectiveStatus = getEffectiveStatus(event);
           const expired = isEventExpired(event);
+          const eventMarks = attendance.filter(a => a.eventId === event.id).length;
           const isClosed = effectiveStatus === 'Closed';
           const isActive = effectiveStatus === 'Active';
           const isDraft = effectiveStatus === 'Draft';
@@ -252,7 +391,11 @@ export default function EventManagement() {
                 </div>
               </div>
 
-              {/* Action Buttons panel */}
+              {/* Action Buttons panel.
+                  position/zIndex lift this above the closed-event scrim below.
+                  The scrim has pointerEvents:'none', so without this the buttons
+                  would still work but LOOK greyed out — a control that reads as
+                  dead and isn't is worse than one that is. */}
               <div style={{
                 borderTop: '1px solid var(--border-color)',
                 paddingTop: '1rem',
@@ -260,16 +403,23 @@ export default function EventManagement() {
                 alignItems: 'center',
                 justifyContent: 'space-between',
                 flexWrap: 'wrap',
-                gap: '0.5rem'
+                gap: '0.5rem',
+                position: 'relative',
+                zIndex: 1
               }}>
-                <div style={{ display: 'flex', gap: '0.35rem' }}>
+                <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
                   {/* Status Toggle Control */}
                   <button
-                    onClick={() => toggleEventStatus(event)}
+                    onClick={() => (isClosed && expired ? openReopenModal(event) : toggleEventStatus(event))}
                     className="btn btn-secondary"
                     style={{ padding: '0.45rem 0.75rem', fontSize: '0.8rem' }}
-                    disabled={isClosed && expired}
-                    title={isClosed && expired ? 'Event has passed its end time and cannot be reopened' : isDraft ? 'Activate Event' : isActive ? 'Close Event' : 'Reopen Event'}
+                    // An expired event can only be reopened by extending its end
+                    // time, so that route goes through the reopen dialog — but it
+                    // is no longer simply disabled.
+                    disabled={isClosed && expired && !canEditClosed}
+                    title={isClosed && expired
+                      ? (canEditClosed ? 'Reopen by extending the end time' : 'Past its end time — only an administrator can reopen it')
+                      : isDraft ? 'Activate Event' : isActive ? 'Close Event' : 'Reopen Event'}
                   >
                     {isDraft && <Play size={12} />}
                     {isActive && <Archive size={12} />}
@@ -278,6 +428,30 @@ export default function EventManagement() {
                       {isDraft ? 'Activate' : isActive ? 'Close' : 'Reopen'}
                     </span>
                   </button>
+
+                  <button
+                    onClick={() => openEditModal(event)}
+                    className="btn btn-ghost"
+                    style={{ padding: '0.45rem 0.7rem', fontSize: '0.8rem' }}
+                    disabled={isClosed && !canEditClosed}
+                    title={isClosed && !canEditClosed ? 'Closed — only an administrator can edit it' : 'Edit this event'}
+                  >
+                    <Pencil size={12} />
+                    <span style={{ marginLeft: '0.25rem' }}>Edit</span>
+                  </button>
+
+                  {canEditClosed && (
+                    <button
+                      onClick={() => handleDeleteEvent(event)}
+                      className="btn btn-ghost"
+                      style={{ padding: '0.45rem 0.7rem', fontSize: '0.8rem', color: 'var(--danger)' }}
+                      title={eventMarks > 0
+                        ? `${eventMarks} attendance record(s) — cannot be deleted`
+                        : 'Delete this event'}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
                 </div>
 
                 {/* Shareable Pre-registration Link */}

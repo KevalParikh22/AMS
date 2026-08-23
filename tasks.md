@@ -115,7 +115,9 @@ Completed 2026-08-23, from operating a real three-day shibir.
 - [x] **Mass attendance import** — `markPresentBulk` marks many people present in one write with one audit entry; a loop over `markPresent` could not work, since it reads stale state. Previews matched / already-present / ambiguous / not-found before writing. Needed a conflict-target fix in `cloudSync` so a batch containing an already-marked person no longer fails entirely.
 - [x] **Mandals & Karyakars view** — rename, merge, safe delete with reassign, per-mandal balak counts, and inline karyakar reassignment, all Admin-gated. Replaces the Admin Control panels, whose handlers bypassed the permission check and whose delete silently orphaned every balak in the mandal.
 
-Note for existing deployments: re-run `supabase/schema.sql` to add the `area` column. Existing sabha rows keep their data and default to `Unassigned` — assign areas from Admin Control or the mapping CSV.
+- [x] **Event edit / reopen / delete** — there was no edit form for any event and no delete at all. Closed events are now Admin-editable (`allowClosed`, matching the attendance override), an expired event can be reopened by extending its end time, and an event with **no** attendance can be deleted. `events_write` was `for all`, which covers DELETE, so any coordinator could already remove an event and cascade away its register; split into insert/update (Coordinator) and delete (Admin).
+
+Note for existing deployments: re-run `supabase/schema.sql` to add the `area` column. The same re-run applies the events delete-policy split. Existing sabha rows keep their data and default to `Unassigned` — assign areas from Admin Control or the mapping CSV.
 
 ## Cross-cutting / engineering
 
