@@ -14,6 +14,7 @@ import EventManagement from './views/EventManagement';
 import SharedRegistration from './views/SharedRegistration';
 import Reports from './views/Reports';
 import BalakDirectory from './views/BalakDirectory';
+import LookupManager from './views/LookupManager';
 import AdminSettings from './views/AdminSettings';
 
 function AppContent() {
@@ -68,6 +69,8 @@ function AppContent() {
         return <EventManagement />;
       case 'balaks':
         return <BalakDirectory />;
+      case 'lookups':
+        return <LookupManager />;
       case 'reports':
         return <Reports />;
       case 'admin':

@@ -177,10 +177,16 @@ export function pushTable(storageKey, rows) {
     // Deliberate wipes go through wipeTable().
     if (!cfg.appendOnly && mapped.length > 0) {
       const keep = mapped.map(r => r[cfg.key]);
+      // JSON.stringify gives PostgREST's own escaping ("a\"b"). The previous
+      // encoder STRIPPED embedded quotes instead of escaping them, so a key
+      // containing one appeared de-quoted in the keep-list, failed to match its
+      // own row, and was deleted by the very prune meant to preserve it. Keys
+      // are ids for most tables but the NAME for sabhas and karyakars, where a
+      // typed quote is entirely plausible.
       const { error } = await supabase
         .from(cfg.table)
         .delete()
-        .not(cfg.key, 'in', `(${keep.map(k => `"${String(k).replace(/"/g, '')}"`).join(',')})`);
+        .not(cfg.key, 'in', `(${keep.map(k => JSON.stringify(String(k))).join(',')})`);
       if (error) throw new Error(`${cfg.table} prune: ${error.message}`);
     }
   };

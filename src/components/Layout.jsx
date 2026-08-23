@@ -10,6 +10,7 @@ import {
   Calendar, 
   BarChart3, 
   Settings, 
+  Layers,
   LogOut, 
   Menu, 
   X,
@@ -28,6 +29,7 @@ export default function Layout({ children, currentView, setView }) {
     { id: 'balaks', name: t('nav.balaks'), icon: Users, requiredRole: 'Coordinator' },
     { id: 'import', name: t('nav.import'), icon: FileSpreadsheet, requiredRole: 'Admin' },
     { id: 'events', name: t('nav.events'), icon: Calendar, requiredRole: 'Coordinator' },
+    { id: 'lookups', name: t('nav.lookups'), icon: Layers, requiredRole: 'Admin' },
     { id: 'reports', name: t('nav.reports'), icon: BarChart3, requiredRole: 'Coordinator' },
     { id: 'admin', name: t('nav.admin'), icon: Settings, requiredRole: 'Admin' }
   ];

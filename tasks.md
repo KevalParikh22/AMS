@@ -111,6 +111,10 @@ Completed 2026-08-23, from operating a real three-day shibir.
 - [x] **Attendance desk filtering and sorting** — the desk had search only, and an empty search listed the whole roster in insertion order. Adds check-in status / mandal / karyakar filters and a sort dropdown (best match, name, mandal, recently checked in), with an "everyone has checked in" empty state. `SwipeTrack` moved to module scope: as an inner component it was remounted on every parent render, discarding an in-progress swipe.
 - [x] **Sortable report tables** — clickable headers on all five Reports tables via `useTableSort` + `SortableTh`, plus area and karyakar filters. Sorting is applied at the array-definition site, so the Excel exports and QR badge sheet follow the on-screen order.
 
+- [x] **Roster export and ID-keyed re-import** — the Balak Registry exports the rows on screen with a Participant ID column, and the importer updates by that ID. Without it, correcting a name or guardian number in a sheet changed the identity key and created a duplicate instead of a fix. Unknown IDs are rejected, never created.
+- [x] **Mass attendance import** — `markPresentBulk` marks many people present in one write with one audit entry; a loop over `markPresent` could not work, since it reads stale state. Previews matched / already-present / ambiguous / not-found before writing. Needed a conflict-target fix in `cloudSync` so a batch containing an already-marked person no longer fails entirely.
+- [x] **Mandals & Karyakars view** — rename, merge, safe delete with reassign, per-mandal balak counts, and inline karyakar reassignment, all Admin-gated. Replaces the Admin Control panels, whose handlers bypassed the permission check and whose delete silently orphaned every balak in the mandal.
+
 Note for existing deployments: re-run `supabase/schema.sql` to add the `area` column. Existing sabha rows keep their data and default to `Unassigned` — assign areas from Admin Control or the mapping CSV.
 
 ## Cross-cutting / engineering
