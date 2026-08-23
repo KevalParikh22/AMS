@@ -304,7 +304,12 @@ export default function Reports() {
         members: members.length,
         eventCount: relevantEvents.length,
         presentMarks,
+        // Both figures are attendance OPPORTUNITIES (members x events), not head
+        // counts, so absent is simply the complement. It can never go negative:
+        // attendance is unique per (event, participant), so a member is counted
+        // at most once per event and presentMarks cannot exceed expected.
         expected,
+        absent: expected - presentMarks,
         percentage: expected > 0 ? Math.round((presentMarks / expected) * 100) : 0
       };
     });
@@ -326,6 +331,7 @@ export default function Reports() {
         members,
         presentMarks,
         expected,
+        absent: expected - presentMarks,
         percentage: expected > 0 ? Math.round((presentMarks / expected) * 100) : 0
       };
     });
@@ -340,9 +346,9 @@ export default function Reports() {
     'Mandal/Sabha': row.sabha,
     'Participants': row.members,
     'Events Held': row.eventCount,
-    'Present Marks': row.presentMarks,
-    'Expected Marks': row.expected,
-    'Attendance %': `${row.percentage}%`
+    'Present': row.presentMarks,
+    'Absent': row.absent,
+    'Present %': `${row.percentage}%`
   }));
 
   const handleExportSabhaSummary = () => {
@@ -352,9 +358,9 @@ export default function Reports() {
       'Area': row.area,
       'Mandals': row.sabhaCount,
       'Participants': row.members,
-      'Present Marks': row.presentMarks,
-      'Expected Marks': row.expected,
-      'Attendance %': `${row.percentage}%`
+      'Present': row.presentMarks,
+      'Absent': row.absent,
+      'Present %': `${row.percentage}%`
     }))), 'Area Summary');
     XLSX.writeFile(wb, 'Sabha_Attendance_Summary.xlsx');
     addAuditLog('Export Report', 'Exported sabha-wise and area-wise attendance summary to Excel.');
@@ -1186,7 +1192,9 @@ export default function Reports() {
             </button>
           </div>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.5rem' }}>
-            Attendance percentage per sabha across all Active and Closed events in scope. Draft events are excluded.
+            Attendance across all Active and Closed events in scope; Draft events are excluded.
+            <strong> Present</strong> and <strong>Absent</strong> count attendance across those events, not people —
+            10 balaks over 3 events is 30, so a mandal can show more than it has members.
           </p>
 
           {/* Area rollup: the same numbers grouped a level up */}
@@ -1198,9 +1206,9 @@ export default function Reports() {
                   <SortableTh sortKey="area" sort={areaSort}>Area</SortableTh>
                   <SortableTh sortKey="sabhaCount" sort={areaSort} firstDir="desc">Mandals</SortableTh>
                   <SortableTh sortKey="members" sort={areaSort} firstDir="desc">Participants</SortableTh>
-                  <SortableTh sortKey="presentMarks" sort={areaSort} firstDir="desc">Present Marks</SortableTh>
-                  <SortableTh sortKey="expected" sort={areaSort} firstDir="desc">Expected Marks</SortableTh>
-                  <SortableTh sortKey="percentage" sort={areaSort} firstDir="desc">Attendance %</SortableTh>
+                  <SortableTh sortKey="presentMarks" sort={areaSort} firstDir="desc">Present</SortableTh>
+                  <SortableTh sortKey="absent" sort={areaSort} firstDir="desc">Absent</SortableTh>
+                  <SortableTh sortKey="percentage" sort={areaSort} firstDir="desc">Present %</SortableTh>
                 </tr>
               </thead>
               <tbody>
@@ -1210,7 +1218,7 @@ export default function Reports() {
                     <td>{row.sabhaCount}</td>
                     <td>{row.members}</td>
                     <td>{row.presentMarks}</td>
-                    <td>{row.expected}</td>
+                    <td>{row.absent}</td>
                     <td>
                       <span className={`badge ${
                         row.percentage >= 75 ? 'badge-success' : row.percentage >= 40 ? 'badge-warning' : 'badge-danger'
@@ -1240,9 +1248,9 @@ export default function Reports() {
                   <SortableTh sortKey="sabha" sort={mandalSort}>Mandal / Sabha</SortableTh>
                   <SortableTh sortKey="members" sort={mandalSort} firstDir="desc">Participants</SortableTh>
                   <SortableTh sortKey="eventCount" sort={mandalSort} firstDir="desc">Events Held</SortableTh>
-                  <SortableTh sortKey="presentMarks" sort={mandalSort} firstDir="desc">Present Marks</SortableTh>
-                  <SortableTh sortKey="expected" sort={mandalSort} firstDir="desc">Expected Marks</SortableTh>
-                  <SortableTh sortKey="percentage" sort={mandalSort} firstDir="desc">Attendance %</SortableTh>
+                  <SortableTh sortKey="presentMarks" sort={mandalSort} firstDir="desc">Present</SortableTh>
+                  <SortableTh sortKey="absent" sort={mandalSort} firstDir="desc">Absent</SortableTh>
+                  <SortableTh sortKey="percentage" sort={mandalSort} firstDir="desc">Present %</SortableTh>
                 </tr>
               </thead>
               <tbody>
@@ -1253,7 +1261,7 @@ export default function Reports() {
                     <td>{row.members}</td>
                     <td>{row.eventCount}</td>
                     <td>{row.presentMarks}</td>
-                    <td>{row.expected}</td>
+                    <td>{row.absent}</td>
                     <td>
                       <span className={`badge ${
                         row.percentage >= 75 ? 'badge-success' : row.percentage >= 40 ? 'badge-warning' : 'badge-danger'
