@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useDb } from '../context/DbContext';
 import { useAuth } from '../context/AuthContext';
 import QrCode from '../components/QrCode';
@@ -25,6 +25,8 @@ export default function Reports() {
     participants,
     attendance,
     markPresent,
+    undoAttendance,
+    getEffectiveStatus,
     approveParticipant,
     rejectParticipant,
     linkParticipant,
@@ -34,7 +36,7 @@ export default function Reports() {
     addAuditLog
   } = useDb();
 
-  const { user, canViewGuardianDetails } = useAuth();
+  const { user, canViewGuardianDetails, hasPermission } = useAuth();
 
   // Filters state
   const [selectedEventId, setSelectedEventId] = useState(events[0]?.id || '');
@@ -42,6 +44,17 @@ export default function Reports() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [activeTab, setActiveTab] = useState('attendance'); // 'attendance' | 'sabha-summary' | 'pending-review'
+
+  // The initial useState above reads `events` on the first render only, which in
+  // cloud mode is before anything has loaded — so it settled on '' and never
+  // recovered, leaving the picker blank. Adopt the first event once they arrive,
+  // and recover if the selected event disappears.
+  useEffect(() => {
+    if (events.length === 0) return;
+    if (!events.some(e => e.id === selectedEventId)) {
+      setSelectedEventId(events[0].id);
+    }
+  }, [events, selectedEventId]);
 
   // Get active event details
   const activeEvent = events.find(e => e.id === selectedEventId);
@@ -274,6 +287,32 @@ export default function Reports() {
       );
     }
     setTimeout(() => setReviewMsg(null), 8000);
+  };
+
+  // --- Admin correction of a closed event's roster ---
+  //
+  // Events auto-close past their end time and an expired one can never be
+  // reopened, so a mark missed on the day would otherwise be permanent. Only an
+  // Admin sees these controls, and each change is audited under its own action.
+  const eventIsClosed = Boolean(activeEvent) && getEffectiveStatus(activeEvent) === 'Closed';
+  const canCorrectClosed = eventIsClosed && hasPermission('Admin');
+
+  const handleCorrectAttendance = (row) => {
+    if (!canCorrectClosed) return;
+    const verb = row.present ? 'Mark ABSENT' : 'Mark PRESENT';
+    if (!window.confirm(
+      `${verb}: "${row.name}" (${row.id}) for the closed event "${activeEvent.name}"?\n\n` +
+      'This event has already finished. The correction is recorded in the audit log against your name.'
+    )) return;
+
+    const result = row.present
+      ? undoAttendance(activeEvent.id, row.id, { allowClosed: true })
+      : markPresent(activeEvent.id, row.id, { allowClosed: true });
+
+    reportReview(
+      result,
+      `${row.name} is now marked ${row.present ? 'absent' : 'present'} for ${activeEvent.name}.`
+    );
   };
 
   const handleApproveRegistration = (pId) => {
@@ -521,6 +560,37 @@ export default function Reports() {
 
           {/* Roster Report Table */}
           <div className="glass-panel" style={{ padding: '1rem', borderRadius: 'var(--radius-md)' }}>
+            {canCorrectClosed && (
+              <div style={{
+                marginBottom: '1rem',
+                padding: '0.75rem 1rem',
+                borderRadius: 'var(--radius-sm)',
+                backgroundColor: 'var(--warning-light, rgba(255,170,0,0.12))',
+                border: '1px solid var(--warning)',
+                color: 'var(--text-primary)',
+                fontSize: '0.85rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem'
+              }}>
+                <AlertCircle size={16} color="var(--warning)" />
+                <span>
+                  <strong>Correction mode.</strong> "{activeEvent.name}" is closed, so the desk can no
+                  longer change it. As an administrator you can still fix this roster — every change is
+                  logged against your name.
+                </span>
+              </div>
+            )}
+
+            {reviewMsg && (
+              <div
+                className={`badge ${reviewMsg.ok ? 'badge-success' : 'badge-danger'}`}
+                style={{ display: 'block', marginBottom: '1rem', padding: '0.6rem 0.9rem', fontSize: '0.85rem' }}
+              >
+                {reviewMsg.text}
+              </div>
+            )}
+
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
               <h4 style={{ fontSize: '1rem', fontWeight: 600 }}>Roster Roll-Call List</h4>
               <div style={{ display: 'flex', gap: '0.5rem' }}>
@@ -566,6 +636,7 @@ export default function Reports() {
                     <th>Mandal-Sabha</th>
                     <th>Karyakar</th>
                     <th>Attendance Status</th>
+                    {canCorrectClosed && <th>Correction</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -594,11 +665,24 @@ export default function Reports() {
                           {row.present ? 'Present' : 'Absent'}
                         </span>
                       </td>
+                      {canCorrectClosed && (
+                        <td>
+                          <button
+                            onClick={() => handleCorrectAttendance(row)}
+                            className="btn btn-ghost"
+                            style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}
+                            title={`Correct ${row.name}'s attendance for this closed event`}
+                          >
+                            {row.present ? <X size={13} /> : <Check size={13} />}
+                            <span>{row.present ? 'Mark absent' : 'Mark present'}</span>
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                   {reportRoster.length > rosterVisible && (
                     <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', padding: '0.75rem' }}>
+                      <td colSpan={canCorrectClosed ? 7 : 6} style={{ textAlign: 'center', padding: '0.75rem' }}>
                         <button onClick={() => setRosterVisible(v => v + 50)} className="btn btn-secondary" style={{ padding: '0.5rem 1.5rem', fontSize: '0.85rem' }}>
                           Show more ({reportRoster.length - rosterVisible} remaining)
                         </button>
@@ -607,7 +691,7 @@ export default function Reports() {
                   )}
                   {reportRoster.length === 0 && (
                     <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                      <td colSpan={canCorrectClosed ? 7 : 6} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
                         No records match the current filter selection.
                       </td>
                     </tr>

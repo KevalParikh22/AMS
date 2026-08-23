@@ -799,14 +799,21 @@ export const DbProvider = ({ children }) => {
   };
 
   // Attendance Actions
-  const markPresent = (eventId, participantId) => {
+  //
+  // `allowClosed` lets an Admin correct a roster after the event has ended.
+  // Events auto-close past their end time and an expired one can never be
+  // reopened, so without this a mark missed on the day is unfixable forever.
+  // It is an Admin-only override: everyone else is refused exactly as before.
+  const markPresent = (eventId, participantId, { allowClosed = false } = {}) => {
     if (!user) {
       return { success: false, message: 'Sign in required to mark attendance.' };
     }
     // Check if event is Closed (explicitly or expired past its end time)
     const event = events.find(e => e.id === eventId);
     if (!event) return { success: false, message: 'Event not found' };
-    if (getEffectiveStatus(event) === 'Closed') {
+    const isClosed = getEffectiveStatus(event) === 'Closed';
+    const correcting = isClosed && allowClosed && hasPermission(ROLES.ADMIN);
+    if (isClosed && !correcting) {
       return { success: false, message: 'Cannot register attendance: Event is closed.' };
     }
 
@@ -856,22 +863,29 @@ export const DbProvider = ({ children }) => {
     }
 
     const participant = participants.find(p => p.id === participantId);
+    // A post-hoc correction gets its own action name so the logbook can tell it
+    // apart from a mark made on the day.
     addAuditLog(
-      'Attendance Mark Present',
-      `Marked present: ${participant ? participant.name : 'Unknown'} (${participantId}) for Event: ${event.name} (${eventId})`
+      correcting ? 'Attendance Correction (Closed Event)' : 'Attendance Mark Present',
+      correcting
+        ? `Marked present after close: ${participant ? participant.name : 'Unknown'} (${participantId}) for closed event: ${event.name} (${eventId})`
+        : `Marked present: ${participant ? participant.name : 'Unknown'} (${participantId}) for Event: ${event.name} (${eventId})`
     );
 
     return { success: true, attendance: newAttendance, syncPromise };
   };
 
-  // Attendance corrections are Coordinator+ (decision D4)
-  const undoAttendance = (eventId, participantId) => {
+  // Attendance corrections are Coordinator+ (decision D4). `allowClosed` is the
+  // same Admin-only post-close override as markPresent.
+  const undoAttendance = (eventId, participantId, { allowClosed = false } = {}) => {
     if (!hasPermission(ROLES.COORDINATOR)) {
       return { success: false, message: 'Only coordinators or admins can correct attendance.' };
     }
     const event = events.find(e => e.id === eventId);
     if (!event) return { success: false, message: 'Event not found' };
-    if (getEffectiveStatus(event) === 'Closed') {
+    const isClosed = getEffectiveStatus(event) === 'Closed';
+    const correcting = isClosed && allowClosed && hasPermission(ROLES.ADMIN);
+    if (isClosed && !correcting) {
       return { success: false, message: 'Cannot modify attendance: Event is closed.' };
     }
 
@@ -885,16 +899,21 @@ export const DbProvider = ({ children }) => {
     
     setAttendance(updated);
 
+    let syncPromise;
     if (isCloudMode) {
       // Delete just this row, for the same reason markPresent inserts just one:
       // a full-table reconcile would prune concurrent volunteers' marks.
       localStorage.setItem('ams_attendance', JSON.stringify(updated));
-      trackWrite('ams_attendance', deleteRow('ams_attendance', record.id))
+      // Mirrors markPresent: the caller gets a promise it can report on. This
+      // used to swallow the failure into console.error, so a correction that
+      // never reached Supabase looked identical to one that did.
+      syncPromise = trackWrite('ams_attendance', deleteRow('ams_attendance', record.id))
         .then(() => setCloudStatus('online'))
         .catch(err => {
           console.error('Undo attendance failed:', err);
           setCloudStatus('error');
           refreshFromCloud('ams_attendance', setAttendance);
+          throw new Error('Could not remove the attendance mark — check the connection and try again.');
         });
     } else {
       saveToStorage('ams_attendance', updated);
@@ -902,11 +921,13 @@ export const DbProvider = ({ children }) => {
 
     const participant = participants.find(p => p.id === participantId);
     addAuditLog(
-      'Attendance Correction (Undo)',
-      `Undid present status for: ${participant ? participant.name : 'Unknown'} (${participantId}) at event: ${event.name}`
+      correcting ? 'Attendance Correction (Closed Event)' : 'Attendance Correction (Undo)',
+      correcting
+        ? `Removed present status after close for: ${participant ? participant.name : 'Unknown'} (${participantId}) at closed event: ${event.name}`
+        : `Undid present status for: ${participant ? participant.name : 'Unknown'} (${participantId}) at event: ${event.name}`
     );
 
-    return { success: true };
+    return { success: true, syncPromise };
   };
 
   // Register New Participant. Attendance is NOT marked here — callers must
