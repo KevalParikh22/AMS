@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth, ROLES } from './AuthContext';
 import { isCloudMode } from '../lib/supabase';
-import { fetchAllTables, fetchTable, pushTable, insertRow, upsertRows, deleteRow, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
+import { fetchAllTables, fetchTable, pushTable, wipeTable, insertRow, upsertRows, deleteRow, subscribeToChanges, CLOUD_KEYS } from '../lib/cloudSync';
 import { uniqueId } from '../lib/ids';
 import { extractGuardianPhone, normalizePhone, participantKey } from '../lib/participantIdentity';
 
@@ -396,7 +396,13 @@ export const DbProvider = ({ children }) => {
   const trackWrite = (key, promise) => {
     const m = inFlightWrites.current;
     m.set(key, (m.get(key) || 0) + 1);
+    // Idempotent: the safety timer and .finally() can both fire, and a second
+    // decrement would drop the counter to zero while another write was still
+    // in flight — reopening the window this guard exists to close.
+    let released = false;
     const release = () => {
+      if (released) return;
+      released = true;
       const n = (m.get(key) || 1) - 1;
       if (n > 0) m.set(key, n); else m.delete(key);
     };
@@ -639,6 +645,9 @@ export const DbProvider = ({ children }) => {
     let duplicates = 0;
     const newParticipantsList = [...participants];
     const seenKeysInFile = new Set();
+    // Exactly the rows this import creates or changes — the only ones that
+    // need writing. Anything untouched must be left alone in the cloud.
+    const touchedRows = [];
 
     parsedRows.forEach(row => {
       const name = String(row.name || '').trim();
@@ -655,7 +664,7 @@ export const DbProvider = ({ children }) => {
       // No contactable guardian number = no unique identifier: create flagged
       // for manual review (decision D3, as revised for guardian-held contacts)
       if (!phone) {
-        newParticipantsList.push({
+        const reviewRow = {
           id: nextSeqId('P-', 'ams_seq_participant', newParticipantsList),
           name,
           phone: '',
@@ -665,7 +674,9 @@ export const DbProvider = ({ children }) => {
           createdAt: new Date().toISOString(),
           isNewRegistration: false,
           status: 'pending'
-        });
+        };
+        newParticipantsList.push(reviewRow);
+        touchedRows.push(reviewRow);
         review++;
         return;
       }
@@ -702,10 +713,11 @@ export const DbProvider = ({ children }) => {
           unchanged++;
         } else {
           newParticipantsList[existingIdx] = merged;
+          touchedRows.push(merged);
           updated++;
         }
       } else {
-        newParticipantsList.push({
+        const insertedRow = {
           id: nextSeqId('P-', 'ams_seq_participant', newParticipantsList),
           name,
           phone,
@@ -715,13 +727,29 @@ export const DbProvider = ({ children }) => {
           createdAt: new Date().toISOString(),
           isNewRegistration: false,
           status: 'approved'
-        });
+        };
+        newParticipantsList.push(insertedRow);
+        touchedRows.push(insertedRow);
         inserted++;
       }
     });
 
     setParticipants(newParticipantsList);
-    saveToStorage('ams_participants', newParticipantsList);
+    if (isCloudMode) {
+      // Only the rows this import actually created or changed. A full-table
+      // reconcile would delete every cloud participant absent from the file —
+      // catastrophic if the roster had not loaded, and wrong even when it had,
+      // since an import is not a declaration of the entire registry.
+      localStorage.setItem('ams_participants', JSON.stringify(newParticipantsList));
+      trackWrite('ams_participants', upsertRows('ams_participants', touchedRows))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Import sync failed:', err);
+          setCloudStatus('error');
+        });
+    } else {
+      saveToStorage('ams_participants', newParticipantsList);
+    }
 
     // Audit Log
     addAuditLog(
@@ -917,17 +945,21 @@ export const DbProvider = ({ children }) => {
     const updatedParticipants = [...participants, newP];
     setParticipants(updatedParticipants);
 
-    if (isPublicSubmission && isCloudMode) {
-      // Insert just this row rather than reconciling the whole (RLS-emptied)
-      // array, and hand the caller the in-flight write so the public form can
-      // report a real failure instead of showing a false success receipt.
+    if (isCloudMode) {
+      // Insert just this row. A full-table reconcile here was a live data-loss
+      // path: an Admin registering one walk-in from a device whose roster had
+      // failed to load pushed [newP] and pruned every other participant.
+      // Registration only ever ADDS someone, so a single insert is all it needs.
       localStorage.setItem('ams_participants', JSON.stringify(updatedParticipants));
-      newP.syncPromise = insertRow('ams_participants', newP)
+      const write = trackWrite('ams_participants', insertRow('ams_participants', newP))
         .then(() => setCloudStatus('online'))
         .catch(err => {
           setCloudStatus('error');
           throw err;
         });
+      // The public form awaits this to avoid showing a false success receipt.
+      if (isPublicSubmission) newP.syncPromise = write;
+      else write.catch(err => console.error('Registration sync failed:', err));
     } else {
       saveToStorage('ams_participants', updatedParticipants);
     }
@@ -1152,12 +1184,27 @@ export const DbProvider = ({ children }) => {
     );
     let movedMarks = 0;
     let droppedMarks = 0;
+    // Track the individual rows so the cloud write can target them instead of
+    // reconciling the whole attendance table.
+    const removedMarks = [];   // duplicate marks for an event the survivor already has
+    const movedRows = [];      // reassigned to the survivor
     const updatedAttendance = attendance
       .map(a => {
         if (a.participantId !== duplicateId) return a;
-        if (survivorEventIds.has(a.eventId)) { droppedMarks++; return null; }
+        if (survivorEventIds.has(a.eventId)) {
+          droppedMarks++;
+          removedMarks.push(a);
+          return null;
+        }
         movedMarks++;
-        return { ...a, participantId: survivorId };
+        // Attendance rows are immutable server-side (insert/delete only), so
+        // reassigning a mark is delete-then-insert. The new row gets a fresh
+        // id so it can never collide with the row being deleted, whatever
+        // order the two statements land in.
+        const moved = { ...a, id: uniqueId('A-'), participantId: survivorId };
+        removedMarks.push(a);
+        movedRows.push(moved);
+        return moved;
       })
       .filter(Boolean);
 
@@ -1173,10 +1220,32 @@ export const DbProvider = ({ children }) => {
       return p;
     });
 
+    const linkedDuplicate = { ...duplicate, status: 'linked', linkedToId: survivorId };
     setAttendance(updatedAttendance);
-    saveToStorage('ams_attendance', updatedAttendance);
     setParticipants(updatedList);
-    saveToStorage('ams_participants', updatedList);
+
+    if (isCloudMode) {
+      // Only the two participants that changed, and only the attendance rows
+      // actually moved or dropped. Reconciling either table in full pruned
+      // anything missing from this device — and the attendance prune fires for
+      // Coordinators too, not just Admins.
+      localStorage.setItem('ams_attendance', JSON.stringify(updatedAttendance));
+      localStorage.setItem('ams_participants', JSON.stringify(updatedList));
+      trackWrite('ams_participants', upsertRows('ams_participants', [mergedSurvivor, linkedDuplicate]))
+        .then(() => setCloudStatus('online'))
+        .catch(err => {
+          console.error('Merge sync failed:', err);
+          setCloudStatus('error');
+        });
+      // Attendance rows are immutable, so a moved mark is delete-then-insert.
+      trackWrite('ams_attendance', (async () => {
+        for (const row of removedMarks) await deleteRow('ams_attendance', row.id);
+        if (movedRows.length > 0) await upsertRows('ams_attendance', movedRows);
+      })()).catch(err => console.error('Merge attendance sync failed:', err));
+    } else {
+      saveToStorage('ams_attendance', updatedAttendance);
+      saveToStorage('ams_participants', updatedList);
+    }
     addAuditLog(
       'Participants Merged',
       `Merged ${duplicate.name} (${duplicateId}) into ${survivor.name} (${survivorId}). Moved ${movedMarks} attendance mark(s), dropped ${droppedMarks} duplicate mark(s).`
@@ -1200,9 +1269,12 @@ export const DbProvider = ({ children }) => {
     // In cloud mode, clear the shared tables too (audit trail is append-only
     // server-side, so cloud logs are retained by design)
     if (isCloudMode) {
-      pushTable('ams_attendance', []).catch(() => {});
-      pushTable('ams_events', []).catch(() => {});
-      pushTable('ams_participants', []).catch(() => {});
+      // wipeTable, not pushTable([]): pushing an empty array no longer deletes
+      // anything, precisely so a device that failed to load cannot wipe a table
+      // by accident. Emptying it here is the deliberate intent.
+      wipeTable('ams_attendance').catch(() => {});
+      wipeTable('ams_events').catch(() => {});
+      wipeTable('ams_participants').catch(() => {});
     }
     
     const resetLog = [{
