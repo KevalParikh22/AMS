@@ -32,10 +32,7 @@ export default function EventManagement() {
   // Closed events are Admin-only to change, matching the post-close
   // attendance correction already in place.
   const canEditClosed = hasPermission(ROLES.ADMIN);
-  const editingClosed = editingEventId
-    ? (() => { const ev = events.find(e => e.id === editingEventId); return ev ? getEffectiveStatus(ev) === 'Closed' : false; })()
-    : false;
-  
+
   const [showCreateModal, setShowCreateModal] = useState(false);
   // Set while editing an existing event: the same form serves both, so the
   // create and edit fields cannot drift apart.
@@ -54,6 +51,12 @@ export default function EventManagement() {
   const [endTime, setEndTime] = useState('18:00');
   const [sabhaScope, setSabhaScope] = useState('All Sabhas');
   const [status, setStatus] = useState('Draft');
+
+  // Declared AFTER the state it reads: a `const` is in the temporal dead zone
+  // until its own declaration, so deriving this above `editingEventId` threw
+  // "Cannot access before initialization" and took the whole page down.
+  const editingEvent = editingEventId ? events.find(e => e.id === editingEventId) : null;
+  const editingClosed = editingEvent ? getEffectiveStatus(editingEvent) === 'Closed' : false;
 
   // Every action reports its outcome. The status toggle used to discard
   // updateEvent's return entirely, so a refusal looked identical to success.
