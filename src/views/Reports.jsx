@@ -280,41 +280,38 @@ export default function Reports() {
     setRosterVisible(PAGE_SIZE);
   }, [selectedEventId, selectedSabha, areaFilter, karyakarFilter, statusFilter, searchQuery]);
 
-  // Sabha-wise attendance summary across events (Phase 0 decision D8).
-  // Draft events are excluded; expected = members x relevant events.
-  const summaryEvents = events.filter(e => e.status !== 'Draft');
-  const sabhaSummaryBase = [...new Set(participants.filter(p => p.status === 'approved').map(p => p.sabha))]
+  // Sabha-wise summary for the SELECTED event (Phase 0 decision D8).
+  //
+  // These are head counts, so present + absent === members on every row and the
+  // table reconciles against its own Participants column. It used to multiply
+  // members by the event count, which meant a mandal of 118 across 5 events
+  // reported 425 absences — a number that could not be read against the 118 next
+  // to it, and that two faults inflated further: a Draft event that merely
+  // expired was counted as an event that happened, and a balak was counted
+  // absent from events held before they joined. Counting one event at a time
+  // removes the multiplication those faults acted on.
+  //
+  // Reuses isExpected and presentIds from the attendance tab rather than
+  // restating the rule, so the summary is a genuine breakdown of the same
+  // figures the roster reports and cannot drift from them.
+  const sabhaSummaryBase = [...new Set(participants.filter(isExpected).map(p => p.sabha))]
     .sort()
     .map(sabhaName => {
-      const members = participants.filter(p => p.status === 'approved' && p.sabha === sabhaName);
-      const relevantEvents = summaryEvents.filter(
-        e => e.sabhaMandalScope === 'All Sabhas' || e.sabhaMandalScope === sabhaName
-      );
-      const memberIds = new Set(members.map(m => m.id));
-      const relevantEventIds = new Set(relevantEvents.map(e => e.id));
-      const presentMarks = attendance.filter(
-        a => relevantEventIds.has(a.eventId) && memberIds.has(a.participantId)
-      ).length;
-      const expected = members.length * relevantEvents.length;
+      const members = participants.filter(p => isExpected(p) && p.sabha === sabhaName);
+      const present = members.filter(p => presentIds.has(p.id)).length;
       return {
         sabha: sabhaName,
         // A participant's sabha is free text and need not be in the lookup at
         // all, so an unmapped mandal falls back rather than dropping out.
         area: areaOfSabha(sabhaName),
         members: members.length,
-        eventCount: relevantEvents.length,
-        presentMarks,
-        // Both figures are attendance OPPORTUNITIES (members x events), not head
-        // counts, so absent is simply the complement. It can never go negative:
-        // attendance is unique per (event, participant), so a member is counted
-        // at most once per event and presentMarks cannot exceed expected.
-        expected,
-        absent: expected - presentMarks,
-        percentage: expected > 0 ? Math.round((presentMarks / expected) * 100) : 0
+        present,
+        absent: members.length - present,
+        percentage: members.length > 0 ? Math.round((present / members.length) * 100) : 0
       };
     });
 
-  // Areas roll several mandals into one group. Summing the sabha rows rather
+  // Areas roll several mandals into one group. Summing the mandal rows rather
   // than recomputing keeps the two tables incapable of disagreeing. Built from
   // the BASE array, not the sorted one, so a column sort on the mandal table
   // cannot perturb the area totals.
@@ -323,16 +320,14 @@ export default function Reports() {
     .map(area => {
       const rows = sabhaSummaryBase.filter(r => r.area === area);
       const members = rows.reduce((s, r) => s + r.members, 0);
-      const presentMarks = rows.reduce((s, r) => s + r.presentMarks, 0);
-      const expected = rows.reduce((s, r) => s + r.expected, 0);
+      const present = rows.reduce((s, r) => s + r.present, 0);
       return {
         area,
         sabhaCount: rows.length,
         members,
-        presentMarks,
-        expected,
-        absent: expected - presentMarks,
-        percentage: expected > 0 ? Math.round((presentMarks / expected) * 100) : 0
+        present,
+        absent: members - present,
+        percentage: members > 0 ? Math.round((present / members) * 100) : 0
       };
     });
 
@@ -342,11 +337,11 @@ export default function Reports() {
   // One row shape for all three places that emit the sabha summary, so an added
   // column can never reach some of them and not the others.
   const sabhaSummaryRows = () => sabhaSummary.map(row => ({
+    'Event': activeEvent ? `${activeEvent.name} (${activeEvent.date})` : '-',
     'Area': row.area,
     'Mandal/Sabha': row.sabha,
     'Participants': row.members,
-    'Events Held': row.eventCount,
-    'Present': row.presentMarks,
+    'Present': row.present,
     'Absent': row.absent,
     'Present %': `${row.percentage}%`
   }));
@@ -355,10 +350,11 @@ export default function Reports() {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sabhaSummaryRows()), 'Sabha Summary');
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(areaSummary.map(row => ({
+      'Event': activeEvent ? `${activeEvent.name} (${activeEvent.date})` : '-',
       'Area': row.area,
       'Mandals': row.sabhaCount,
       'Participants': row.members,
-      'Present': row.presentMarks,
+      'Present': row.present,
       'Absent': row.absent,
       'Present %': `${row.percentage}%`
     }))), 'Area Summary');
@@ -1191,11 +1187,33 @@ export default function Reports() {
               <span>Export to Excel</span>
             </button>
           </div>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.5rem' }}>
-            Attendance across all Active and Closed events in scope; Draft events are excluded.
-            <strong> Present</strong> and <strong>Absent</strong> count attendance across those events, not people —
-            10 balaks over 3 events is 30, so a mandal can show more than it has members.
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1rem' }}>
+            Head counts for one event: <strong>Present + Absent = Participants</strong> on every row, and the
+            totals match the Present and Absent figures on the Attendance Roster tab for the same event.
+            A mandal outside this event's scope is not listed.
           </p>
+
+          {/* The numbers are per-event now, so the event has to be visible and
+              changeable here rather than only on the attendance tab, whose
+              picker this shares. */}
+          <div className="form-group" style={{ marginBottom: '1.5rem', maxWidth: '420px' }}>
+            <label className="form-label">Event</label>
+            <select
+              className="form-control"
+              value={selectedEventId}
+              onChange={(e) => setSelectedEventId(e.target.value)}
+            >
+              {events.map(e => (
+                <option key={e.id} value={e.id}>{e.name} ({e.date})</option>
+              ))}
+            </select>
+          </div>
+
+          {!activeEvent && (
+            <div className="badge badge-warning" style={{ display: 'block', padding: '0.85rem', fontSize: '0.85rem' }}>
+              Select an event to see its mandal and area breakdown.
+            </div>
+          )}
 
           {/* Area rollup: the same numbers grouped a level up */}
           <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem' }}>By Area</h4>
@@ -1206,7 +1224,7 @@ export default function Reports() {
                   <SortableTh sortKey="area" sort={areaSort}>Area</SortableTh>
                   <SortableTh sortKey="sabhaCount" sort={areaSort} firstDir="desc">Mandals</SortableTh>
                   <SortableTh sortKey="members" sort={areaSort} firstDir="desc">Participants</SortableTh>
-                  <SortableTh sortKey="presentMarks" sort={areaSort} firstDir="desc">Present</SortableTh>
+                  <SortableTh sortKey="present" sort={areaSort} firstDir="desc">Present</SortableTh>
                   <SortableTh sortKey="absent" sort={areaSort} firstDir="desc">Absent</SortableTh>
                   <SortableTh sortKey="percentage" sort={areaSort} firstDir="desc">Present %</SortableTh>
                 </tr>
@@ -1217,7 +1235,7 @@ export default function Reports() {
                     <td style={{ fontWeight: 600 }}>{row.area}</td>
                     <td>{row.sabhaCount}</td>
                     <td>{row.members}</td>
-                    <td>{row.presentMarks}</td>
+                    <td>{row.present}</td>
                     <td>{row.absent}</td>
                     <td>
                       <span className={`badge ${
@@ -1247,8 +1265,7 @@ export default function Reports() {
                   <SortableTh sortKey="area" sort={mandalSort}>Area</SortableTh>
                   <SortableTh sortKey="sabha" sort={mandalSort}>Mandal / Sabha</SortableTh>
                   <SortableTh sortKey="members" sort={mandalSort} firstDir="desc">Participants</SortableTh>
-                  <SortableTh sortKey="eventCount" sort={mandalSort} firstDir="desc">Events Held</SortableTh>
-                  <SortableTh sortKey="presentMarks" sort={mandalSort} firstDir="desc">Present</SortableTh>
+                  <SortableTh sortKey="present" sort={mandalSort} firstDir="desc">Present</SortableTh>
                   <SortableTh sortKey="absent" sort={mandalSort} firstDir="desc">Absent</SortableTh>
                   <SortableTh sortKey="percentage" sort={mandalSort} firstDir="desc">Present %</SortableTh>
                 </tr>
@@ -1259,8 +1276,7 @@ export default function Reports() {
                     <td style={{ color: 'var(--text-secondary)' }}>{row.area}</td>
                     <td style={{ fontWeight: 600 }}>{row.sabha}</td>
                     <td>{row.members}</td>
-                    <td>{row.eventCount}</td>
-                    <td>{row.presentMarks}</td>
+                    <td>{row.present}</td>
                     <td>{row.absent}</td>
                     <td>
                       <span className={`badge ${
@@ -1273,7 +1289,7 @@ export default function Reports() {
                 ))}
                 {sabhaSummary.length === 0 && (
                   <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                    <td colSpan={6} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
                       No participant data available for summary.
                     </td>
                   </tr>
