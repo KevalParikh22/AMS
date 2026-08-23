@@ -26,7 +26,7 @@ const buildShareUrl = (eventId) =>
   `${window.location.origin}${window.location.pathname}?view=shared-registration${eventId ? `&eventId=${eventId}` : ''}`;
 
 export default function EventManagement() {
-  const { events, addEvent, updateEvent, sabhas, getEffectiveStatus, isEventExpired } = useDb();
+  const { events, addEvent, updateEvent, sabhaNames, getEffectiveStatus, isEventExpired } = useDb();
   
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [copiedEventId, setCopiedEventId] = useState(null);
@@ -140,7 +140,7 @@ export default function EventManagement() {
                 onChange={(e) => setSabhaScope(e.target.value)}
               >
                 <option value="All Sabhas">All Sabhas (Global)</option>
-                {sabhas.map(s => (
+                {sabhaNames.map(s => (
                   <option key={s} value={s}>{s}</option>
                 ))}
               </select>

@@ -8,7 +8,7 @@ import { AlertTriangle } from 'lucide-react';
 // by the nav filter, so this component does no role check of its own —
 // updateParticipant and the participants_update RLS policy are the real gates.
 export default function ParticipantEditModal({ participant, onClose }) {
-  const { sabhas, karyakars, updateParticipant } = useDb();
+  const { sabhaNames, karyakars, updateParticipant } = useDb();
 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -50,7 +50,7 @@ export default function ParticipantEditModal({ participant, onClose }) {
   const phoneChanged = phone.trim() !== (participant.phone || '');
   // The sabha on record may not be in the configured list (legacy import), and
   // dropping it silently would reassign the person on save.
-  const sabhaOptions = sabhas.includes(sabha) || !sabha ? sabhas : [sabha, ...sabhas];
+  const sabhaOptions = sabhaNames.includes(sabha) || !sabha ? sabhaNames : [sabha, ...sabhaNames];
 
   const handleSubmit = (e) => {
     e.preventDefault();

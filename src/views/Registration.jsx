@@ -14,7 +14,7 @@ import {
 
 export default function Registration({ setView, selectedEventId }) {
   const {
-    sabhas,
+    sabhaNames,
     karyakars,
     participants,
     registerNewParticipant,
@@ -45,10 +45,10 @@ export default function Registration({ setView, selectedEventId }) {
   const activeEvent = candidateEvent && getEffectiveStatus(candidateEvent) === 'Active' ? candidateEvent : null;
 
   useEffect(() => {
-    if (sabhas.length > 0 && !sabha) {
-      setSabha(sabhas[0]);
+    if (sabhaNames.length > 0 && !sabha) {
+      setSabha(sabhaNames[0]);
     }
-  }, [sabhas]);
+  }, [sabhaNames]);
 
   // Karyakars are mapped to sabhas: picking a sabha auto-selects its karyakar
   const mappedKaryakars = karyakars.filter(k => k.sabha === sabha);
@@ -256,7 +256,7 @@ export default function Registration({ setView, selectedEventId }) {
                 value={sabha} 
                 onChange={(e) => setSabha(e.target.value)}
               >
-                {sabhas.map(s => (
+                {sabhaNames.map(s => (
                   <option key={s} value={s}>{s}</option>
                 ))}
               </select>

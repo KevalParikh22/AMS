@@ -8,13 +8,19 @@ import { extractGuardianPhone, normalizePhone, participantKey } from '../lib/par
 const DbContext = createContext();
 
 // Initial Mock Data
+//
+// Each sabha carries the area it belongs to, so reports can roll up a level
+// above the mandal. Areas are a reporting grouping only — events are still
+// scoped to a single sabha or all of them.
+const UNASSIGNED_AREA = 'Unassigned';
+
 const INITIAL_SABHAS = [
-  'Bal Sabha - Sub-group A1',
-  'Bal Sabha - Sub-group A2',
-  'Bal Sabha - Sub-group B1',
-  'Kishore Mandal - East Wing',
-  'Kishore Mandal - West Wing',
-  'Yuva Mandal - Youth'
+  { name: 'Bal Sabha - Sub-group A1', area: 'North Zone' },
+  { name: 'Bal Sabha - Sub-group A2', area: 'North Zone' },
+  { name: 'Bal Sabha - Sub-group B1', area: 'South Zone' },
+  { name: 'Kishore Mandal - East Wing', area: 'East Zone' },
+  { name: 'Kishore Mandal - West Wing', area: 'West Zone' },
+  { name: 'Yuva Mandal - Youth', area: 'North Zone' }
 ];
 
 // Each karyakar is mapped to their mandal/sabha so forms need a single pick;
@@ -185,6 +191,21 @@ const migrateParticipantsList = (list) => list.map(p => {
   return { ...rest, name, status };
 });
 
+// Migrate legacy plain-string sabha entries to { name, area } objects.
+// Same shape as the karyakar migration below: sabhas were a bare string array
+// before areas existed, and both localStorage and an un-migrated cloud row can
+// still hold that form.
+const migrateSabhasList = (list) => {
+  if (!Array.isArray(list)) return [];
+  return list.map(entry => {
+    if (typeof entry === 'string') {
+      const known = INITIAL_SABHAS.find(s => s.name === entry);
+      return { name: entry, area: known ? known.area : UNASSIGNED_AREA };
+    }
+    return { name: entry.name, area: entry.area || UNASSIGNED_AREA };
+  }).filter(s => s.name);
+};
+
 // Migrate legacy plain-string karyakar entries to { name, sabha } objects
 const migrateKaryakarsList = (list) => {
   if (list.length > 0 && typeof list[0] === 'string') {
@@ -245,7 +266,7 @@ export const DbProvider = ({ children }) => {
       localStorage.setItem('ams_events', JSON.stringify(loadedEvents));
 
       setAttendance(read('ams_attendance', INITIAL_ATTENDANCE));
-      setSabhas(read('ams_sabhas', INITIAL_SABHAS));
+      setSabhas(migrateSabhasList(read('ams_sabhas', INITIAL_SABHAS)));
       setKaryakars(migrateKaryakarsList(read('ams_karyakars', INITIAL_KARYAKARS)));
 
       if (loadedLogs.length === 0 && seedIfEmpty) {
@@ -308,7 +329,7 @@ export const DbProvider = ({ children }) => {
           pushTable('ams_audit_logs', [closeLog]).catch(() => {});
         }
         setEvents(loadedEvents);
-        setSabhas(data.ams_sabhas);
+        setSabhas(migrateSabhasList(data.ams_sabhas));
 
         // participants / attendance / karyakars are gated on my_role() being
         // non-null. Read without a session they come back as an EMPTY SUCCESS
@@ -326,7 +347,7 @@ export const DbProvider = ({ children }) => {
         // read was actually allowed to see, so a signed-out boot cannot wipe
         // the roster the device already had.
         localStorage.setItem('ams_events', JSON.stringify(loadedEvents));
-        localStorage.setItem('ams_sabhas', JSON.stringify(data.ams_sabhas));
+        localStorage.setItem('ams_sabhas', JSON.stringify(migrateSabhasList(data.ams_sabhas)));
         if (signedIn) {
           localStorage.setItem('ams_participants', JSON.stringify(data.ams_participants));
           localStorage.setItem('ams_attendance', JSON.stringify(data.ams_attendance));
@@ -365,7 +386,7 @@ export const DbProvider = ({ children }) => {
       ams_participants: (rows) => setParticipants(migrateParticipantsList(rows)),
       ams_events: setEvents,
       ams_attendance: setAttendance,
-      ams_sabhas: setSabhas,
+      ams_sabhas: (rows) => setSabhas(migrateSabhasList(rows)),
       ams_karyakars: setKaryakars,
       ams_audit_logs: setAuditLogs
     };
@@ -452,14 +473,14 @@ export const DbProvider = ({ children }) => {
       if (snapshot.ams_participants) await pushTable('ams_participants', migrateParticipantsList(snapshot.ams_participants));
       if (snapshot.ams_events) await pushTable('ams_events', snapshot.ams_events);
       if (snapshot.ams_attendance) await pushTable('ams_attendance', snapshot.ams_attendance);
-      if (snapshot.ams_sabhas) await pushTable('ams_sabhas', snapshot.ams_sabhas);
+      if (snapshot.ams_sabhas) await pushTable('ams_sabhas', migrateSabhasList(snapshot.ams_sabhas));
       if (snapshot.ams_karyakars) await pushTable('ams_karyakars', migrateKaryakarsList(snapshot.ams_karyakars));
       if (snapshot.ams_audit_logs) await pushTable('ams_audit_logs', snapshot.ams_audit_logs);
       const fresh = await fetchAllTables();
       setParticipants(migrateParticipantsList(fresh.ams_participants));
       setEvents(fresh.ams_events);
       setAttendance(fresh.ams_attendance);
-      setSabhas(fresh.ams_sabhas);
+      setSabhas(migrateSabhasList(fresh.ams_sabhas));
       setKaryakars(fresh.ams_karyakars);
       setAuditLogs(fresh.ams_audit_logs);
       localStorage.removeItem('ams_sandbox_backup');
@@ -538,19 +559,42 @@ export const DbProvider = ({ children }) => {
     remapKaryakars = [],
     // When a karyakar moves, optionally move the balaks under them too, so the
     // roster does not keep pointing at the karyakar's old sabha.
-    cascadeParticipants = false
+    cascadeParticipants = false,
+    // Sabha -> area assignments. Like remapKaryakars this is separate from the
+    // add list, because adding skips names that already exist and a re-import
+    // could otherwise never correct a wrong area.
+    sabhaAreas = []
   }) => {
     if (!hasPermission(ROLES.ADMIN)) {
       return { error: 'Only administrators can edit master data.' };
     }
 
     const addedSabhas = [];
-    const updatedSabhas = [...sabhas];
+    let updatedSabhas = [...sabhas];
     newSabhaNames.forEach(rawName => {
       const name = String(rawName || '').trim();
-      if (!name || updatedSabhas.includes(name)) return;
-      updatedSabhas.push(name);
+      if (!name || updatedSabhas.some(s => s.name === name)) return;
+      updatedSabhas.push({ name, area: UNASSIGNED_AREA });
       addedSabhas.push(name);
+    });
+
+    // Assign or change a sabha's area. A sabha named here that does not exist
+    // yet is created, so an area sheet can stand alone as an import.
+    const areaChanges = [];
+    sabhaAreas.forEach(entry => {
+      const name = String(entry?.sabha || '').trim();
+      const area = String(entry?.area || '').trim();
+      if (!name || !area) return;
+      const existing = updatedSabhas.find(s => s.name === name);
+      if (!existing) {
+        updatedSabhas.push({ name, area });
+        addedSabhas.push(name);
+        areaChanges.push({ sabha: name, from: UNASSIGNED_AREA, to: area });
+        return;
+      }
+      if (existing.area === area) return;
+      areaChanges.push({ sabha: name, from: existing.area, to: area });
+      updatedSabhas = updatedSabhas.map(s => (s.name === name ? { ...s, area } : s));
     });
 
     const addedKaryakars = [];
@@ -574,7 +618,7 @@ export const DbProvider = ({ children }) => {
       updatedKaryakars = updatedKaryakars.map(k => (k.name === name ? { ...k, sabha } : k));
     });
 
-    if (addedSabhas.length > 0) {
+    if (addedSabhas.length > 0 || areaChanges.length > 0) {
       setSabhas(updatedSabhas);
       saveToStorage('ams_sabhas', updatedSabhas);
     }
@@ -618,18 +662,19 @@ export const DbProvider = ({ children }) => {
       }
     }
 
-    if (addedSabhas.length > 0 || addedKaryakars.length > 0 || remapped.length > 0) {
+    if (addedSabhas.length > 0 || addedKaryakars.length > 0 || remapped.length > 0 || areaChanges.length > 0) {
       addAuditLog(
         'Add Import Lookups',
         `Created ${addedSabhas.length} sabha(s) and ${addedKaryakars.length} karyakar(s), remapped ${remapped.length}.` +
         (addedSabhas.length ? ` Sabhas: ${addedSabhas.join(', ')}.` : '') +
         (addedKaryakars.length ? ` Karyakars: ${addedKaryakars.map(k => `${k.name} → ${k.sabha}`).join(', ')}.` : '') +
         (remapped.length ? ` Remapped: ${remapped.map(r => `${r.name} ${r.from} → ${r.to}`).join(', ')}.` : '') +
+        (areaChanges.length ? ` Areas: ${areaChanges.map(a => `${a.sabha} ${a.from} → ${a.to}`).join(', ')}.` : '') +
         (movedParticipants ? ` Moved ${movedParticipants} participant(s) to follow their karyakar.` : '')
       );
     }
 
-    return { addedSabhas, addedKaryakars, remapped, movedParticipants };
+    return { addedSabhas, addedKaryakars, remapped, movedParticipants, areaChanges };
   };
 
   // Register or insert spreadsheet imports (Admin only, per decision D4)
@@ -1337,12 +1382,28 @@ export const DbProvider = ({ children }) => {
     saveToStorage('ams_audit_logs', resetLog);
   };
 
+  // Sabhas are objects now, but nearly every consumer wants the plain name list
+  // for a dropdown or an `includes` check. Deriving it here keeps those call
+  // sites a one-word change instead of an object-shape change.
+  const sabhaNames = sabhas.map(s => s.name);
+
+  // A participant's sabha is free text and need not appear in the lookup at all
+  // (legacy rosters, imports that created a sabha implicitly), so an unknown
+  // name must fall back rather than drop out of a report.
+  const areaOfSabha = (name) =>
+    sabhas.find(s => s.name === name)?.area || UNASSIGNED_AREA;
+
+  const areas = [...new Set(sabhas.map(s => s.area).filter(Boolean))].sort();
+
   return (
     <DbContext.Provider value={{
       participants,
       events,
       attendance,
       sabhas,
+      sabhaNames,
+      areaOfSabha,
+      areas,
       karyakars,
       auditLogs,
       queryParticipants,

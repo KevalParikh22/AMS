@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 
 export default function SharedRegistration({ eventId }) {
-  const { events, sabhas, publicSelfCheckIn, getCurrentPublicEvent, getEffectiveStatus } = useDb();
+  const { events, sabhaNames, publicSelfCheckIn, getCurrentPublicEvent, getEffectiveStatus } = useDb();
   const { t } = useLang();
 
   const [name, setName] = useState('');
@@ -41,10 +41,10 @@ export default function SharedRegistration({ eventId }) {
   React.useEffect(() => {
     if (event && event.sabhaMandalScope !== 'All Sabhas') {
       setSabha(event.sabhaMandalScope);
-    } else if (sabhas.length > 0) {
-      setSabha(sabhas[0]);
+    } else if (sabhaNames.length > 0) {
+      setSabha(sabhaNames[0]);
     }
-  }, [event, sabhas]);
+  }, [event, sabhaNames]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -292,7 +292,7 @@ export default function SharedRegistration({ eventId }) {
                       value={sabha}
                       onChange={(e) => setSabha(e.target.value)}
                     >
-                      {sabhas.map(s => (
+                      {sabhaNames.map(s => (
                         <option key={s} value={s}>{s}</option>
                       ))}
                     </select>

@@ -27,6 +27,7 @@ export default function Reports() {
     markPresent,
     undoAttendance,
     getEffectiveStatus,
+    areaOfSabha,
     approveParticipant,
     rejectParticipant,
     linkParticipant,
@@ -252,6 +253,9 @@ export default function Reports() {
       const expected = members.length * relevantEvents.length;
       return {
         sabha: sabhaName,
+        // A participant's sabha is free text and need not be in the lookup at
+        // all, so an unmapped mandal falls back rather than dropping out.
+        area: areaOfSabha(sabhaName),
         members: members.length,
         eventCount: relevantEvents.length,
         presentMarks,
@@ -260,20 +264,50 @@ export default function Reports() {
       };
     });
 
+  // Areas roll several mandals into one group. Summing the sabha rows rather
+  // than recomputing keeps the two tables incapable of disagreeing.
+  const areaSummary = [...new Set(sabhaSummary.map(r => r.area))]
+    .sort()
+    .map(area => {
+      const rows = sabhaSummary.filter(r => r.area === area);
+      const members = rows.reduce((s, r) => s + r.members, 0);
+      const presentMarks = rows.reduce((s, r) => s + r.presentMarks, 0);
+      const expected = rows.reduce((s, r) => s + r.expected, 0);
+      return {
+        area,
+        sabhaCount: rows.length,
+        members,
+        presentMarks,
+        expected,
+        percentage: expected > 0 ? Math.round((presentMarks / expected) * 100) : 0
+      };
+    });
+
+  // One row shape for all three places that emit the sabha summary, so an added
+  // column can never reach some of them and not the others.
+  const sabhaSummaryRows = () => sabhaSummary.map(row => ({
+    'Area': row.area,
+    'Mandal/Sabha': row.sabha,
+    'Participants': row.members,
+    'Events Held': row.eventCount,
+    'Present Marks': row.presentMarks,
+    'Expected Marks': row.expected,
+    'Attendance %': `${row.percentage}%`
+  }));
+
   const handleExportSabhaSummary = () => {
-    const dataToExport = sabhaSummary.map(row => ({
-      'Mandal/Sabha': row.sabha,
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sabhaSummaryRows()), 'Sabha Summary');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(areaSummary.map(row => ({
+      'Area': row.area,
+      'Mandals': row.sabhaCount,
       'Participants': row.members,
-      'Events Held': row.eventCount,
       'Present Marks': row.presentMarks,
       'Expected Marks': row.expected,
       'Attendance %': `${row.percentage}%`
-    }));
-    const ws = XLSX.utils.json_to_sheet(dataToExport);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Sabha Summary');
+    }))), 'Area Summary');
     XLSX.writeFile(wb, 'Sabha_Attendance_Summary.xlsx');
-    addAuditLog('Export Report', 'Exported sabha-wise attendance summary to Excel.');
+    addAuditLog('Export Report', 'Exported sabha-wise and area-wise attendance summary to Excel.');
   };
 
   // Full multi-sheet workbook: roster + sabha summary + pending queue
@@ -285,6 +319,7 @@ export default function Reports() {
       'Participant ID': row.id,
       'Full Name': row.name,
       'Contact Number': row.phone,
+      'Area': areaOfSabha(row.sabha),
       'Mandal/Sabha Class': row.sabha,
       'Responsible Karyakar': row.karyakar,
       'Guardian Contact Details': canViewGuardianDetails ? row.guardianDetails : 'Restricted',
@@ -293,15 +328,7 @@ export default function Reports() {
     })));
     XLSX.utils.book_append_sheet(wb, rosterSheet, 'Attendance Roster');
 
-    const summarySheet = XLSX.utils.json_to_sheet(sabhaSummary.map(row => ({
-      'Mandal/Sabha': row.sabha,
-      'Participants': row.members,
-      'Events Held': row.eventCount,
-      'Present Marks': row.presentMarks,
-      'Expected Marks': row.expected,
-      'Attendance %': `${row.percentage}%`
-    })));
-    XLSX.utils.book_append_sheet(wb, summarySheet, 'Sabha Summary');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sabhaSummaryRows()), 'Sabha Summary');
 
     const pendingSheet = XLSX.utils.json_to_sheet(pendingRegistrations.map(p => ({
       'Reference ID': p.id,
@@ -1069,10 +1096,54 @@ export default function Reports() {
             Attendance percentage per sabha across all Active and Closed events in scope. Draft events are excluded.
           </p>
 
+          {/* Area rollup: the same numbers grouped a level up */}
+          <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem' }}>By Area</h4>
+          <div className="table-container" style={{ marginBottom: '2rem' }}>
+            <table className="custom-table">
+              <thead>
+                <tr>
+                  <th>Area</th>
+                  <th>Mandals</th>
+                  <th>Participants</th>
+                  <th>Present Marks</th>
+                  <th>Expected Marks</th>
+                  <th>Attendance %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {areaSummary.map((row) => (
+                  <tr key={row.area}>
+                    <td style={{ fontWeight: 600 }}>{row.area}</td>
+                    <td>{row.sabhaCount}</td>
+                    <td>{row.members}</td>
+                    <td>{row.presentMarks}</td>
+                    <td>{row.expected}</td>
+                    <td>
+                      <span className={`badge ${
+                        row.percentage >= 75 ? 'badge-success' : row.percentage >= 40 ? 'badge-warning' : 'badge-danger'
+                      }`}>
+                        {row.percentage}%
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                {areaSummary.length === 0 && (
+                  <tr>
+                    <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                      No data yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '0.75rem' }}>By Mandal</h4>
           <div className="table-container">
             <table className="custom-table">
               <thead>
                 <tr>
+                  <th>Area</th>
                   <th>Mandal / Sabha</th>
                   <th>Participants</th>
                   <th>Events Held</th>
@@ -1084,6 +1155,7 @@ export default function Reports() {
               <tbody>
                 {sabhaSummary.map((row) => (
                   <tr key={row.sabha}>
+                    <td style={{ color: 'var(--text-secondary)' }}>{row.area}</td>
                     <td style={{ fontWeight: 600 }}>{row.sabha}</td>
                     <td>{row.members}</td>
                     <td>{row.eventCount}</td>
@@ -1100,7 +1172,7 @@ export default function Reports() {
                 ))}
                 {sabhaSummary.length === 0 && (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                    <td colSpan={7} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
                       No participant data available for summary.
                     </td>
                   </tr>

@@ -99,6 +99,17 @@ Completed 2026-08-10 — decisions recorded in [phase-0-decisions.md](phase-0-de
 - [ ] Offline *data sync* between devices (current offline mode is per-device localStorage; multi-device sync needs the backend)
 - [ ] Full translation coverage of internal admin screens (only guardian/volunteer-facing surfaces are translated)
 
+## Phase 4 — Reporting and data-quality follow-ups
+
+Completed 2026-08-23, from operating a real three-day shibir.
+
+- [x] **Admin attendance correction after close** — events auto-close past their end time and an expired one cannot be reopened, so a mark missed on the day was permanent. `markPresent`/`undoAttendance` take an Admin-only `allowClosed` override, surfaced as a correction column on the Reports roster and logged under its own audit action. No schema change: the closed-event rule was never enforced server-side.
+- [x] **Multi-day combined report** — a new Reports tab combines any set of non-Draft events into one matrix (a column per day, plus days-attended and a distribution), answering "who came all three days". Ad-hoc selection rather than an event-series field, so it works retroactively. Exports to a two-sheet workbook.
+- [x] **Duplicate detection by mandal + name** — Data Quality keyed on exact name across the whole roster, so common names repeating across mandals buried the real duplicates. The name key now includes the mandal; guardian-number matching is unchanged so siblings still surface. The review queue gained the matching rule, and merge results are now reported instead of discarded.
+- [x] **Mandal → area mapping** — sabhas became `{ name, area }` objects (`migrateSabhasList`; views use the derived `sabhaNames`), with a `sabhas.area` column, an area control and CSV mapping import in Admin Control, an area rollup in the Sabha Summary, and an area filter in the Balak Registry. Areas are a reporting grouping only; events are still scoped to one sabha or all.
+
+Note for existing deployments: re-run `supabase/schema.sql` to add the `area` column. Existing sabha rows keep their data and default to `Unassigned` — assign areas from Admin Control or the mapping CSV.
+
 ## Cross-cutting / engineering
 
 - [ ] Automated tests (none exist)

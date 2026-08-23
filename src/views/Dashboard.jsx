@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 
 export default function Dashboard({ setView, setSelectedEventId }) {
-  const { participants, events, attendance, sabhas, auditLogs, getEffectiveStatus } = useDb();
+  const { participants, events, attendance, sabhaNames, auditLogs, getEffectiveStatus } = useDb();
   const { user } = useAuth();
 
   // Active Events (expired events are effectively closed)
@@ -22,7 +22,7 @@ export default function Dashboard({ setView, setSelectedEventId }) {
   const approvedParticipants = participants.filter(p => p.status === 'approved');
   const totalBalaks = approvedParticipants.length;
   const activeEventsCount = activeEvents.length;
-  const totalSabhasCount = sabhas.length;
+  const totalSabhasCount = sabhaNames.length;
   
   // Calculate attendance count today (or most recent event)
   const todayStr = new Date().toISOString().split('T')[0];
